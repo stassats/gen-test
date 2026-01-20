@@ -1,4 +1,5 @@
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
+(defvar *save* nil)
 ;;; ================================================================
 ;;; 1. CONFIGURATION & GRAMMAR
 ;;; ================================================================
@@ -14,6 +15,7 @@
                           (and fixnum (integer * -1))
                           (and fixnum (integer * -1))
                           (and fixnum (integer 1))))
+
 (defparameter *types* (list* 'boolean *integer-types*))
 (defvar *number-types*)
 (defparameter *max-depth* 6)
@@ -24,20 +26,20 @@
     (-   (number) number)
     (*   (number number) number)
     (/   (number number) number)
-    (truncate (number number) integer)
-    (ceiling (number number) integer)
-    (round (number number) integer)
 
-    (ffloor (number number) number)
-    (ftruncate (number number) number)
-    (fceiling (number number) number)
-    (fround (number number) number)
-    (ffloor (number number) number)
+    (truncate (number) integer)
+    (ceiling (number) integer)
+    (round (number) integer)
+
+    (ffloor (number) number)
+    (ftruncate (number) number)
+    (fceiling (number) number)
+    (fround (number) number)
 
     (max (number number) number)
     (min (number number) number)
     (abs (number) number)
-        
+
     (sin (number) number)
     (sin (integer) number)
     (cos (number) number)
@@ -52,14 +54,19 @@
     (exp (integer) number)
     (log (integer) number)
     (log (integer number) number)
-        
+
     (+   (number integer) number)
     (-   (number integer) number)
     (*   (number integer) number)
     (/   (number integer) number)
 
     (>   (number number) boolean)
-    (<   (number number) boolean)))
+    (<   (number number) boolean)
+    (=   (number number) boolean)
+    (eq   (number number) boolean)
+    (eql   (number number) boolean)
+    (equal   (number number) boolean)
+    (equalp   (number number) boolean)))
 
 (defvar *float-ops*
   '((+   (single-float single-float) single-float)
@@ -75,12 +82,20 @@
     (ftruncate (single-float single-float) single-float)
     (fceiling (single-float single-float) single-float)
     (fround (single-float single-float) single-float)
-    (ffloor (single-float single-float) single-float)
+
+    (truncate (single-float) integer)
+    (ceiling (single-float) integer)
+    (round (single-float) integer)
+
+    (ffloor (single-float) single-float)
+    (ftruncate (single-float) single-float)
+    (fceiling (single-float) single-float)
+    (fround (single-float) single-float)
 
     (max (single-float single-float) single-float)
     (min (single-float single-float) single-float)
     (abs (single-float) single-float)
-        
+
     (sin (single-float) single-float)
     (sin (integer) single-float)
     (cos (single-float) single-float)
@@ -95,7 +110,7 @@
     (exp (integer) number)
     (log (integer) number)
     (log (integer single-float) number)
-        
+
     (+   (single-float integer) single-float)
     (-   (single-float integer) single-float)
     (*   (single-float integer) single-float)
@@ -104,12 +119,18 @@
     (>   (single-float single-float) boolean)
     (<   (single-float single-float) boolean)))
 
+(defparameter *noise-ops*
+  '((unwind-protect (t t) t)
+    (unwind-protect (t) t)
+    (catch (t t) t)))
+
 (defvar *ratio-ops*
   '((+   (rational rational) rational)
     (-   (rational rational) rational)
     (-   (rational) rational)
     (*   (rational rational) rational)
     (/   (rational rational) rational)
+
     (truncate (rational rational) integer)
     (ceiling (rational rational) integer)
     (round (rational rational) integer)
@@ -120,10 +141,20 @@
     (fround (rational rational) rational)
     (ffloor (rational rational) rational)
 
+    (truncate (rational) integer)
+    (ceiling (rational) integer)
+    (round (rational) integer)
+
+    (ffloor (rational) rational)
+    (ftruncate (rational) rational)
+    (fceiling (rational) rational)
+    (fround (rational) rational)
+    (ffloor (rational) rational)
+
     (max (rational rational) rational)
     (min (rational rational) rational)
     (abs (rational) rational)
-        
+
     (sin (rational) single-float)
     (sin (integer) single-float)
     (cos (rational) single-float)
@@ -138,7 +169,7 @@
     (exp (integer) number)
     (log (integer) number)
     (log (integer rational) number)
-        
+
     (+   (rational integer) rational)
     (-   (rational integer) rational)
     (*   (rational integer) rational)
@@ -157,7 +188,7 @@
     (floor (integer integer) integer)
     (ceiling (integer integer) integer)
     (round (integer integer) integer)
-    
+
     (logand (integer integer) integer)
     (logxor (integer integer) integer)
     (logior (integer integer) integer)
@@ -176,8 +207,8 @@
     (>   (integer integer)           boolean)
     (<   (integer integer)           boolean)
     (=   (integer integer)           boolean)
-    
-    
+
+
     ;; Logic
     (and (boolean boolean) boolean)
     (or  (boolean boolean) boolean)
@@ -258,13 +289,15 @@
             (1+ (if (< (random 100) 30)
                     (random 100)
                     (random (1- (expt 2 #.(1- sb-vm:n-fixnum-bits)))))))
-           ((equal type '(integer 1)) 
+           ((equal type '(integer 1))
             (1+ (if (< (random 100) 30)
                     (random 100)
                     (random (expt 2 max-integer)))))
            ((equal type '(integer -256 256))
             (* (random 257)
                (if (zerop (random 2)) 1 -1)))))))
+
+(defvar *noise* nil)
 
 (defun generate-ast (type depth schema)
   (let ((terminals (unless (or (eq type 'boolean)
@@ -277,6 +310,9 @@
     (let* ((stop (>= depth *max-depth*))
            (options (or (if stop terminals (append terminals '(func if)))
                         '(func))))
+      (when (and *noise*
+                 (not stop))
+        (push 'noise options))
       (case (random-elt options)
         (const (random-const type))
         (var   (random-elt vars))
@@ -290,7 +326,14 @@
                        ;; ((eql c a) c)
                        (t
                         (list 'if test c a)))))
-        (func  (if (null funcs) 
+        (noise
+         (let ((op (random-elt *noise-ops*)))
+           (cons (first op)
+                 (loop for arg-t in (second op)
+                       collect (generate-ast (if (eq arg-t t)
+                                                 type
+                                                 arg-t) (1+ depth) schema)))))
+        (func  (if (null funcs)
                    (random-const type)
                    (let ((op (random-elt funcs)))
                      (cons (first op)
@@ -298,12 +341,12 @@
                                  collect (generate-ast arg-t (1+ depth) schema))))))))))
 
 (defun build-random-function (target-type)
-  (let ((schema (loop for i from 1 to 3 
-                      collect (cons (intern (format nil "V~d" i)) 
+  (let ((schema (loop for i from 1 to 3
+                      collect (cons (intern (format nil "V~d" i))
                                     (random-elt *types*)))))
     (let ((body (generate-ast target-type 0 schema))
           (vars (mapcar #'car schema)))
-      (values 
+      (values
        `(lambda ,vars
           (declare (ignorable ,@vars))
           ,@(progn;if (> (random 100) 90)
@@ -311,7 +354,7 @@
                       collect `(declare (type ,(if nil;(> (random 100) 60)
                                                    t
                                                    t-name) ,v))))
-          (declare (optimize (safety 1) (speed 1))) 
+          (declare (optimize (safety 1) (speed 1)))
           ,body)
        schema))))
 
@@ -345,7 +388,7 @@
   "Returns (values result condition)"
   (handler-case
       (handler-bind ((sb-sys:memory-fault-error (lambda (c)
-                                                  (with-standard-io-syntax 
+                                                  (with-standard-io-syntax
                                                     (princ code))
                                                   (break "~a" c))))
         (values (multiple-value-list (funcall func)) nil))
@@ -366,27 +409,35 @@
                floating-point-overflow
                division-by-zero)))
 
-(defun run-test ()
+(defun save-test (code thread)
+  (when *save*
+    (with-open-file (st (format nil "/tmp/test~a" thread)
+                        :if-does-not-exist :create :if-exists :overwrite
+                        :direction :output)
+      (write code :stream st))))
+
+(defun run-test (n)
   (let ((target (random-elt *types*)))
     (multiple-value-bind (code schema) (build-random-function target)
+      (save-test code n)
       (let ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
                   (multiple-value-bind (fun warn fail) (compile nil code)
                     (declare (ignore warn fail))
                     ;; (when fail
                     ;;   (error "~a" code))
                     fun))))
-        
-        (loop repeat 1000 
+
+        (loop repeat 1000
               do
 
               (let ((inputs (loop for (_ . t-name) in schema
                                   collect (random-const t-name))))
                 (multiple-value-bind (c-val c-err) (safe-execute code
-                                                                 (lambda () 
+                                                                 (lambda ()
                                                                    (apply fn inputs)))
                   ;; 2. Run Interpreted
                   (multiple-value-bind (i-val i-err)
-                      (safe-execute (cons 'i code) 
+                      (safe-execute (cons 'i code)
                                     (lambda ()
                                       #+sbcl
                                       (let ((sb-ext:*evaluator-mode* :interpret))
@@ -414,15 +465,21 @@
 
                       ;; D. One Error, One Success (Non-DivZero)
                       (t
-                       (report-error "STATUS MISMATCH (One Error/One Value)" 
+                       (report-error "STATUS MISMATCH (One Error/One Value)"
                                      code inputs (or c-err c-val) (or i-err i-val))))))))))))
 
 ;;; ================================================================
 ;;; 4. MAIN LOOP
 ;;; ================================================================
 
-(defun main (&key (threads 12) float depth rational number)
+(defun main (&key (threads 12) float depth rational number
+                  noise
+                  save)
   (setf *random-state* (make-random-state t))
+  (when save
+    (setf *save* t))
+  (when noise
+    (setf *noise* t))
   (when depth
     (setf *max-depth* depth))
   (when float
@@ -439,18 +496,18 @@
     (push 'number *types*))
   (if (= threads 1)
       (loop
-       (run-test))
+       (run-test 0))
       (let ((threads
-              (loop repeat threads
+              (loop for i below threads
                     collect
                     (sb-thread:make-thread
-                     (lambda ()
-                       (loop
-                        (run-test)))
+                     (let ((i i))
+                       (lambda ()
+                         (loop
+                          (run-test i))))
                      :name "random"))))
         (unwind-protect (mapcar (lambda (th)
                                   (sb-thread:join-thread th :default nil)) threads)
           (mapcar (lambda (th)
                     (ignore-errors (sb-thread:terminate-thread th)))
                   threads)))))
-
