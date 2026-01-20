@@ -14,8 +14,52 @@
                           (and fixnum (integer * -1))
                           (and fixnum (integer * -1))
                           (and fixnum (integer 1))))
-(defparameter *types* (list* 'single-float 'boolean *integer-types*))
+(defparameter *types* (list* 'boolean *integer-types*))
+(defvar *number-types*)
 (defparameter *max-depth* 6)
+
+(defvar *number-ops*
+  '((+   (number number) number)
+    (-   (number number) number)
+    (-   (number) number)
+    (*   (number number) number)
+    (/   (number number) number)
+    (truncate (number number) integer)
+    (ceiling (number number) integer)
+    (round (number number) integer)
+
+    (ffloor (number number) number)
+    (ftruncate (number number) number)
+    (fceiling (number number) number)
+    (fround (number number) number)
+    (ffloor (number number) number)
+
+    (max (number number) number)
+    (min (number number) number)
+    (abs (number) number)
+        
+    (sin (number) number)
+    (sin (integer) number)
+    (cos (number) number)
+    (cos (integer) number)
+
+    (expt (number number) number)
+    (exp (number) number)
+    (log (number) number)
+    (log (number number) number)
+
+    (expt (integer number) number)
+    (exp (integer) number)
+    (log (integer) number)
+    (log (integer number) number)
+        
+    (+   (number integer) number)
+    (-   (number integer) number)
+    (*   (number integer) number)
+    (/   (number integer) number)
+
+    (>   (number number) boolean)
+    (<   (number number) boolean)))
 
 (defvar *float-ops*
   '((+   (single-float single-float) single-float)
@@ -80,10 +124,10 @@
     (min (rational rational) rational)
     (abs (rational) rational)
         
-    (sin (rational) rational)
-    (sin (integer) rational)
-    (cos (rational) rational)
-    (cos (integer) rational)
+    (sin (rational) single-float)
+    (sin (integer) single-float)
+    (cos (rational) single-float)
+    (cos (integer) single-float)
 
     (expt (rational rational) number)
     (exp (rational) number)
@@ -159,6 +203,8 @@
 
 (defun random-const (type)
   (case type
+    (number
+     (random-const (random-elt *number-types*)))
     (integer (* (if (< (random 100) 30)
                     (random 100)
                     (random (expt 2 max-integer)))
@@ -310,8 +356,8 @@
   (format t "~%Reason: ~A" reason)
   (format t "~%Code: ~S" code)
   (format t "~%Inputs: ~A" inputs)
-  (format t "~%Compiled Result: ~A" c-res)
-  (format t "~%Interpret Result: ~A" i-res)
+  (format t "~%Compiled Result: ~S" c-res)
+  (format t "~%Interpret Result: ~S" i-res)
   (format t "~%--------------------------------------------------")
   (error "~a ~a" code inputs))
 
@@ -361,7 +407,9 @@
 
                       ;; C. Both Errored (Non-DivZero): Check Error Types match
                       ((and c-err i-err)
-                       (unless (eq (type-of c-err) (type-of i-err))
+                       (unless (or (eq (type-of c-err) (type-of i-err))
+                                   (subtypep (type-of c-err) (type-of i-err))
+                                   (subtypep (type-of i-err) (type-of c-err)))
                          (report-error "ERROR TYPE MISMATCH" code inputs c-err i-err)))
 
                       ;; D. One Error, One Success (Non-DivZero)
@@ -373,16 +421,22 @@
 ;;; 4. MAIN LOOP
 ;;; ================================================================
 
-(defun main (&key (threads 12) (float t) depth rational)
+(defun main (&key (threads 12) float depth rational number)
   (setf *random-state* (make-random-state t))
   (when depth
     (setf *max-depth* depth))
-  (if float
-      (setf *operators* (append *operators* *float-ops*))
-      (setf *types* (remove 'single-float *types*)))
+  (when float
+    (setf *operators* (append *operators* *float-ops*))
+    (push 'single-float *types*))
   (when rational
     (setf *operators* (append *operators* *ratio-ops*))
     (push 'rational *types*))
+  (when number
+    (setf *operators* (append *operators* *number-ops*))
+    (setf *number-types* (remove 'boolean *types*))
+    (push 'single-float *types*)
+    (push 'rational *types*)
+    (push 'number *types*))
   (if (= threads 1)
       (loop
        (run-test))
