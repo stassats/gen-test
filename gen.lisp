@@ -45,12 +45,12 @@
     (cos (number) number)
     (cos (integer) number)
 
-    (expt (number number) number)
+    ;; (expt (number number) number)
     (exp (number) number)
     (log (number) number)
     (log (number number) number)
 
-    (expt (integer number) number)
+    ;; (expt (integer number) number)
     (exp (integer) number)
     (log (integer) number)
     (log (integer number) number)
@@ -63,7 +63,6 @@
     (>   (number number) boolean)
     (<   (number number) boolean)
     (=   (number number) boolean)
-    (eq   (number number) boolean)
     (eql   (number number) boolean)
     (equal   (number number) boolean)
     (equalp   (number number) boolean)))
@@ -122,7 +121,12 @@
 (defparameter *noise-ops*
   '((unwind-protect (t t) t)
     (unwind-protect (t) t)
-    (catch (t t) t)))
+    (catch (t t) t)
+    (values (t) t)
+    (values (t t) t)
+    (values (t t t) t)
+    (values (t t t t) t)
+    (values (t t t t t) t)))
 
 (defvar *ratio-ops*
   '((+   (rational rational) rational)
@@ -160,12 +164,11 @@
     (cos (rational) single-float)
     (cos (integer) single-float)
 
-    (expt (rational rational) number)
+    ;; (expt (rational rational) number)
     (exp (rational) number)
     (log (rational) number)
     (log (rational rational) number)
 
-    (expt (integer rational) number)
     (exp (integer) number)
     (log (integer) number)
     (log (integer rational) number)
@@ -394,7 +397,13 @@
         (values (multiple-value-list (funcall func)) nil))
     (error (c) (values nil c))))
 
-(defun report-error (reason code inputs c-res i-res)
+(defun save-test (code thread)
+  (with-open-file (st (format nil "/tmp/test~a" thread)
+                      :if-does-not-exist :create :if-exists :overwrite
+                      :direction :output)
+    (write code :stream st)))
+
+(defun report-error (thread reason code inputs c-res i-res)
   (format t "~%!!! DETECTED DISCREPANCY !!!")
   (format t "~%Reason: ~A" reason)
   (format t "~%Code: ~S" code)
@@ -402,32 +411,31 @@
   (format t "~%Compiled Result: ~S" c-res)
   (format t "~%Interpret Result: ~S" i-res)
   (format t "~%--------------------------------------------------")
-  (error "~a ~a" code inputs))
+  (save-test code thread)
+  (error "~a" (format nil "/tmp/test~a" thread)))
 
 (defun is-div-zero (err)
   (typep err '(or floating-point-invalid-operation
                floating-point-overflow
                division-by-zero)))
 
-(defun save-test (code thread)
-  (when *save*
-    (with-open-file (st (format nil "/tmp/test~a" thread)
-                        :if-does-not-exist :create :if-exists :overwrite
-                        :direction :output)
-      (write code :stream st))))
-
-(defun run-test (n)
+(defun run-test (thread)
   (let ((target (random-elt *types*)))
     (multiple-value-bind (code schema) (build-random-function target)
-      (save-test code n)
-      (let ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
-                  (multiple-value-bind (fun warn fail) (compile nil code)
-                    (declare (ignore warn fail))
-                    ;; (when fail
-                    ;;   (error "~a" code))
-                    fun))))
-
-        (loop repeat 1000
+      (when *save*
+        (save-test code thread))
+      (let* ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+                   (multiple-value-bind (fun warn fail) (compile nil code)
+                     (declare (ignore warn fail))
+                     ;; (when fail
+                     ;;   (error "~a" code))
+                     fun)))
+             (type (caddr (sb-kernel:%simple-fun-type fn)))
+             (types (when (typep type '(cons (eql values)))
+                      (let ((ctype (sb-kernel:values-specifier-type type)))
+                        (sb-kernel:values-type-required ctype)))))
+        
+        (loop repeat 2000
               do
 
               (let ((inputs (loop for (_ . t-name) in schema
@@ -435,6 +443,11 @@
                 (multiple-value-bind (c-val c-err) (safe-execute code
                                                                  (lambda ()
                                                                    (apply fn inputs)))
+                  (unless (or c-err
+                              (loop for type in types
+                                    for value in c-val
+                                    always (sb-kernel:%%typep value type)))
+                    (report-error thread "TYPE MISMATCH" code inputs c-val type))
                   ;; 2. Run Interpreted
                   (multiple-value-bind (i-val i-err)
                       (safe-execute (cons 'i code)
@@ -454,18 +467,18 @@
                       ;; B. Both Succeeded: Check Values
                       ((and (not c-err) (not i-err))
                        (unless (values-match-p c-val i-val)
-                         (report-error "VALUE MISMATCH" code inputs c-val i-val)))
+                         (report-error thread "VALUE MISMATCH" code inputs c-val i-val)))
 
                       ;; C. Both Errored (Non-DivZero): Check Error Types match
                       ((and c-err i-err)
                        (unless (or (eq (type-of c-err) (type-of i-err))
                                    (subtypep (type-of c-err) (type-of i-err))
                                    (subtypep (type-of i-err) (type-of c-err)))
-                         (report-error "ERROR TYPE MISMATCH" code inputs c-err i-err)))
+                         (report-error thread "ERROR TYPE MISMATCH" code inputs c-err i-err)))
 
                       ;; D. One Error, One Success (Non-DivZero)
                       (t
-                       (report-error "STATUS MISMATCH (One Error/One Value)"
+                       (report-error thread "STATUS MISMATCH (One Error/One Value)"
                                      code inputs (or c-err c-val) (or i-err i-val))))))))))))
 
 ;;; ================================================================
