@@ -1,5 +1,6 @@
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
 (defvar *save* nil)
+(defvar *check-return-type* t)
 ;;; ================================================================
 ;;; 1. CONFIGURATION & GRAMMAR
 ;;; ================================================================
@@ -246,7 +247,8 @@
     (unsigned-byte (if (< (random 100) 30)
                        (random 100)
                        (random (expt 2 max-integer))))
-    (single-float (+ (random 50.0) 0.5))
+    (single-float (* (random 100000.0)
+                     (if (zerop (random 2)) 1 -1)))
     (boolean      (if (zerop (random 2)) nil t))
     (fixnum (* (random (if (< (random 100) 50)
                            (1+ (random 100))
@@ -258,12 +260,22 @@
          (* (/ (1+ (random (expt 2 max-integer)))
                (1+ (random (expt 2 max-integer))))
             (if (zerop (random 2)) 1 -1))))
+    (complex
+     (random-const (random-elt '((complex rational) (complex single-float)))))
     (t
-     (cond ((equal type '(signed-byte #.sb-vm:n-word-bits))
-            (* (if (< (random 100) 50)
-                   (1+ (random 100))
-                   (random (expt 2 #.(1- sb-vm:n-word-bits))))
-               (if (zerop (random 2)) 1 -1)))
+     (cond ((equal type '(complex rational))
+            (complex (random-const 'rational)
+                     (loop for x = (random-const 'rational)
+                           when (not (eq x 0))
+                           return x)))
+           ((equal type '(complex single-float))
+            (complex (random-const 'single-float)
+                     (random-const 'single-float)))
+           ((equal type '(signed-byte #.sb-vm:n-word-bits))
+               (* (if (< (random 100) 50)
+                      (1+ (random 100))
+                      (random (expt 2 #.(1- sb-vm:n-word-bits))))
+                  (if (zerop (random 2)) 1 -1)))
            ((equal type '(unsigned-byte #.sb-vm:n-word-bits))
             (random (if (< (random 100) 50)
                         (1+ (random 100))
@@ -399,7 +411,7 @@
 
 (defun save-test (code thread)
   (with-open-file (st (format nil "/tmp/test~a" thread)
-                      :if-does-not-exist :create :if-exists :overwrite
+                      :if-does-not-exist :create :if-exists :supersede
                       :direction :output)
     (write code :stream st)))
 
@@ -425,13 +437,14 @@
       (when *save*
         (save-test code thread))
       (let* ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
-                   (multiple-value-bind (fun warn fail) (compile nil code)
+                   (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil code))
                      (declare (ignore warn fail))
                      ;; (when fail
                      ;;   (error "~a" code))
                      fun)))
              (type (caddr (sb-kernel:%simple-fun-type fn)))
-             (types (when (typep type '(cons (eql values)))
+             (types (when (and *check-return-type*
+                               (typep type '(cons (eql values))))
                       (let ((ctype (sb-kernel:values-specifier-type type)))
                         (sb-kernel:values-type-required ctype)))))
         
@@ -503,10 +516,13 @@
     (push 'rational *types*))
   (when number
     (setf *operators* (append *operators* *number-ops*))
-    (setf *number-types* (remove 'boolean *types*))
     (push 'single-float *types*)
     (push 'rational *types*)
-    (push 'number *types*))
+    (push 'number *types*)
+    (push 'complex *types*)
+    (push '(complex rational) *types*)
+    (push '(complex single-float) *types*)
+    (setf *number-types* (remove 'boolean *types*)))
   (if (= threads 1)
       (loop
        (run-test 0))
