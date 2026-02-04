@@ -314,6 +314,7 @@
                (if (zerop (random 2)) 1 -1)))))))
 
 (defvar *noise* nil)
+(defvar *blocks* nil)
 
 (defun generate-ast (type depth schema)
   (let ((terminals (unless (or (eq type 'boolean)
@@ -328,73 +329,93 @@
                         '(func))))
       (when (and *noise*
                  (not stop))
-        (push 'noise options))
+        (push 'noise options)
+        (push 'block options)
+        (when *blocks*
+          (push 'return-from options)))
       (when (and *the*
                  (not stop))
         (push 'the options)
-        (push 'typecase options)
-        )
+        (push 'typecase options))
+      (unless stop
+        (push 'cond options))
       (flet ((gen-type ()
-               `(or ,@(loop repeat (1+ (random 5)) 
+               `(or ,@(loop repeat (1+ (random 5))
                             for not = (zerop (random 2))
                             for type = (random-elt *types*)
-                            collect (if not 
+                            collect (if not
                                         `(not ,type)
                                         type)))))
-       (ecase (random-elt options)
-         (const (random-const type))
-         (var   (random-elt vars))
-         (if    (let ((test (generate-ast 'boolean (1+ depth) schema))
-                      (c (generate-ast type (1+ depth) schema))
-                      (a (generate-ast type (1+ depth) schema)))
-                  (cond ;; ((eq test nil)
-                    ;;  a)
-                    ;; ((eq test t)
-                    ;;  c)
-                    ;; ((eql c a) c)
-                    (t
-                     (list 'if test c a)))))
-         (noise
-          (let ((op (random-elt *noise-ops*)))
-            (cons (first op)
-                  (loop for arg-t in (second op)
-                        collect (generate-ast (if (eq arg-t t)
-                                                  type
-                                                  arg-t) (1+ depth) schema)))))
-         (the
-          `(the
-            ,(gen-type)
-            ,(generate-ast type (1+ depth) schema)))
-         (typecase 
-             `(typecase
-                 ,(generate-ast type (1+ depth) schema)
-                ,@(loop repeat (1+ (random 5)) 
-                        collect `(,(gen-type)
-                                  ,(generate-ast type (1+ depth) schema)))))
-         (func  (if (null funcs)
-                    (random-const type)
-                    (let ((op (random-elt funcs)))
-                      (cons (first op)
-                            (loop for arg-t in (second op)
-                                  collect (generate-ast arg-t (1+ depth) schema)))))))))))
+        (ecase (random-elt options)
+          (const (random-const type))
+          (var   (random-elt vars))
+          (if    (let ((test (generate-ast 'boolean (1+ depth) schema))
+                       (c (generate-ast type (1+ depth) schema))
+                       (a (generate-ast type (1+ depth) schema)))
+                   (cond ;; ((eq test nil)
+                     ;;  a)
+                     ;; ((eq test t)
+                     ;;  c)
+                     ;; ((eql c a) c)
+                     (t
+                      (list 'if test c a)))))
+          (noise
+           (let ((op (random-elt *noise-ops*)))
+             (cons (first op)
+                   (loop for arg-t in (second op)
+                         collect (generate-ast (if (eq arg-t t)
+                                                   type
+                                                   arg-t) (1+ depth) schema)))))
+          (the
+           `(the
+             ,(gen-type)
+             ,(generate-ast type (1+ depth) schema)))
+          (typecase
+              `(typecase
+                   ,(generate-ast type (1+ depth) schema)
+                 ,@(loop repeat (1+ (random 5))
+                         collect `(,(gen-type)
+                                   ,(generate-ast type (1+ depth) schema)))))
+          (cond
+            `(cond
+               ,@(loop repeat (1+ (random 5))
+                       collect `(,(generate-ast 'boolean (1+ depth) schema)
+                                 ,(generate-ast type (1+ depth) schema)))))
+          (block
+              (let* ((block (gentemp))
+                     (*blocks* (cons block *blocks*)))
+                `(block ,block
+                   ,@(loop repeat (1+ (random 3))
+                           collect (generate-ast type (1+ depth) schema)))))
+          (return-from
+           `(return-from ,(random-elt *blocks*)
+              ,(generate-ast type (1+ depth) schema)))
+          (func  (if (null funcs)
+                     (random-const type)
+                     (let ((op (random-elt funcs)))
+                       (cons (first op)
+                             (loop for arg-t in (second op)
+                                   collect (generate-ast arg-t (1+ depth) schema)))))))))))
 
 (defun build-random-function (target-type)
-  (let ((schema (loop for i from 1 to 3
-                      collect (cons (intern (format nil "V~d" i))
-                                    (random-elt *types*)))))
-    (let ((body (generate-ast target-type 0 schema))
-          (vars (mapcar #'car schema)))
-      (values
-       `(lambda ,vars
-          (declare (ignorable ,@vars))
-          ,@(progn;if (> (random 100) 90)
-                (loop for (v . t-name) in schema
-                      collect `(declare (type ,(if nil;(> (random 100) 60)
-                                                   t
-                                                   t-name) ,v))))
-          (declare (optimize (safety 1) (speed 1)))
-          ,body)
-       schema))))
+  (let* ((schema (loop for i from 1 to 3
+                       collect (cons (intern (format nil "V~d" i))
+                                     (random-elt *types*))))
+         *blocks*
+         (sb-impl::*gentemp-counter* 0)
+         (body (generate-ast target-type 0 schema))
+         (vars (mapcar #'car schema)))
+    (values
+     `(lambda ,vars
+        (declare (ignorable ,@vars))
+        ,@(progn;if (> (random 100) 90)
+            (loop for (v . t-name) in schema
+                  collect `(declare (type ,(if nil;(> (random 100) 60)
+                                               t
+                                               t-name) ,v))))
+        (declare (optimize (safety 1) (speed 1)))
+        ,body)
+     schema)))
 
 ;;; ================================================================
 ;;; 3. EXECUTION & COMPARISON
@@ -456,16 +477,16 @@
       (let ((len (length current)))
         (when (< len 1) (return current))
         (when (> n len) (setf n len))
-        
+
         (let ((reduced-p nil))
           (dotimes (i n)
             ;; Create candidate by removing a chunk
             (let* ((chunk-size (max 1 (ceiling len n)))
                    (start (min len (* i chunk-size)))
                    (end (min len (+ start chunk-size)))
-                   (candidate (append (subseq current 0 start) 
+                   (candidate (append (subseq current 0 start)
                                       (subseq current end))))
-              
+
               ;; Only test if we actually removed something
               (when (< (length candidate) (length current))
                 (when (funcall pred candidate)
@@ -473,7 +494,7 @@
                   (setf n 2)
                   (setf reduced-p t)
                   (return)))))
-          
+
           (unless reduced-p
             (if (>= n len)
                 (return current)
@@ -497,28 +518,28 @@
      ;; Strategy B: List Reduction (Delta Debugging)
      ;; Try removing elements from this list (e.g., removing arguments)
      (let ((shrunk-list (ddmin-list form pred)))
-       
+
        ;; Strategy C: Structural Recursion (The missing piece!)
        ;; Now we iterate over the items of the SHRUNK list and try to reduce THEM.
        (let ((final-list shrunk-list))
          (loop for i from 0 below (length final-list) do
            (let ((child (nth i final-list)))
              (when (or (consp child) (stringp child)) ; Optimization: don't reduce symbols/numbers
-               
+
                ;; Create a Contextual Predicate:
-               ;; "Does the bug still exist if we replace the i-th child of 
+               ;; "Does the bug still exist if we replace the i-th child of
                ;; final-list with Candidate?"
-               (let ((context-pred 
+               (let ((context-pred
                       (lambda (candidate)
                         (funcall pred (replace-at-index final-list i candidate)))))
-                 
+
                  ;; Recurse into the child using the context predicate
                  (let ((reduced-child (reduce-tree-pass child context-pred)))
                    ;; If the child changed, update our current list
                    (unless (equal reduced-child child)
                      (setf final-list (replace-at-index final-list i reduced-child))))))))
          final-list)))
-    
+
     (t form)))
 
 (defun reduce-form (form pred)
@@ -531,42 +552,61 @@
             (setf current next))))))
 
 
+
+(defun error-equal (err1 err2)
+  (let ((err1 (type-of err1))
+        (err2 (type-of err2)))
+    (not (and (not (or (eq err1 'sb-sys:memory-fault-error)
+                       (eq err2 'sb-sys:memory-fault-error)))
+              (or (eq err1 err2)
+                  (subtypep err1 err2)
+                  (subtypep err2 err1)
+                  (and (eq err2 'sb-kernel:case-failure)
+                       (subtypep err1 'type-error))
+                  (and (eq err1 'sb-kernel:case-failure)
+                       (subtypep err2 'type-error)))))))
+
 (defun reduce-code (code inputs o-c-val o-i-val o-c-err o-i-err type-mismatch)
-  (flet ((error-eql (err1 err2)
-           (eq (type-of err1) (type-of err2))))
-    (reduce-form code
-              (lambda (reduced)
-                (when (typep reduced '(cons (eql lambda)))
-                  (let* ((*error-output* (make-broadcast-stream)) (fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
-                                  (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil reduced))
-                                    (declare (ignore warn fail))
-                                    ;; (when fail
-                                    ;;   (error "~a" reduced))
-                                    fun)))
-                         (type (caddr (sb-kernel:%simple-fun-type (sb-kernel:%fun-fun fn))))
-                         (types (when (and *check-return-type*
-                                           (typep type '(cons (eql values))))
-                                  (let ((ctype (sb-kernel:values-specifier-type type)))
-                                    (sb-kernel:values-type-required ctype)))))
-                    (multiple-value-bind (c-val c-err) (safe-execute reduced
-                                                                     (lambda ()
-                                                                       (apply fn inputs)))
-                      (cond (type-mismatch
-                             (not (loop for type in types
-                                        for value in c-val
-                                        always (sb-kernel:%%typep value type))))
-                            (t
-                             ;; 2. Run Interpreted
-                             (multiple-value-bind (i-val i-err)
-                                 (safe-execute (cons 'i reduced)
-                                               (lambda ()
-                                                 (let ((sb-ext:*evaluator-mode* :interpret))
-                                                   (handler-bind (((or style-warning warning) #'muffle-warning))
-                                                     (apply (eval reduced) inputs)))))
-                               (and (values-match-p c-val o-c-val)
-                                    (values-match-p i-val o-i-val)
-                                    (error-eql c-err o-c-err)
-                                    (error-eql i-err o-i-err))))))))))))
+  (declare (ignore o-c-val o-i-val))
+  (let ((n-args (length inputs)))
+    (format t "Reducing~%")
+    (sb-ext:with-timeout 200
+      (reduce-form code
+                   (lambda (reduced)
+                     (when (and (typep reduced '(cons (eql lambda) (cons cons)))
+                                (= (length (second reduced)) n-args)
+                                (every #'symbolp (second reduced)))
+                       (let* ((*error-output* (make-broadcast-stream)) 
+                              (fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+                                    (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil reduced))
+                                      (declare (ignore warn fail))
+                                      ;; (when fail
+                                      ;;   (error "~a" reduced))
+                                      fun)))
+                              (type (caddr (sb-kernel:%simple-fun-type (sb-kernel:%fun-fun fn))))
+                              (types (when (and *check-return-type*
+                                                (typep type '(cons (eql values))))
+                                       (let ((ctype (sb-kernel:values-specifier-type type)))
+                                         (sb-kernel:values-type-required ctype)))))
+                         (multiple-value-bind (c-val c-err) (safe-execute reduced
+                                                                          (lambda ()
+                                                                            (apply fn inputs)))
+                           (cond (type-mismatch
+                                  (not (loop for type in types
+                                             for value in c-val
+                                             always (sb-kernel:%%typep value type))))
+                                 (t
+                                  ;; 2. Run Interpreted
+                                  (multiple-value-bind (i-val i-err)
+                                      (safe-execute (cons 'i reduced)
+                                                    (lambda ()
+                                                      (let ((sb-ext:*evaluator-mode* :interpret))
+                                                        (handler-bind (((or style-warning warning) #'muffle-warning))
+                                                          (apply (eval reduced) inputs)))))
+                                    (and (eq (type-of c-err) o-c-err)
+                                         (eq (type-of i-err) o-i-err)
+                                         (or (not (or c-val i-val))
+                                             (not (values-match-p c-val i-val)))))))))))))))
 
 (defun to-defun (code inputs)
   `(progn
@@ -608,7 +648,7 @@
                                (typep type '(cons (eql values))))
                       (let ((ctype (sb-kernel:values-specifier-type type)))
                         (sb-kernel:values-type-required ctype)))))
-        
+
         (loop repeat 2000
               do
 
