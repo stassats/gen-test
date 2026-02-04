@@ -434,22 +434,158 @@
         (values (multiple-value-list (funcall func)) nil))
     (error (c) (values nil c))))
 
-(defun save-test (code thread)
+(defun save-test (code reduced thread)
   (with-open-file (st (format nil "/tmp/test~a" thread)
                       :if-does-not-exist :create :if-exists :supersede
                       :direction :output)
+    (write reduced :stream st)
+    (terpri)
     (write code :stream st)))
+
+(defun replace-at-index (list index new-value)
+  "Functionally returns a new list with the item at INDEX replaced by NEW-VALUE."
+  (loop for item in list
+        for i from 0
+        collect (if (= i index) new-value item)))
 
-(defun report-error (thread reason code inputs c-res i-res)
-  (format t "~%!!! DETECTED DISCREPANCY !!!")
-  (format t "~%Reason: ~A" reason)
-  (format t "~%Code: ~S" code)
-  (format t "~%Inputs: ~A" inputs)
-  (format t "~%Compiled Result: ~S" c-res)
-  (format t "~%Interpret Result: ~S" i-res)
-  (format t "~%--------------------------------------------------")
-  (save-test code thread)
-  (error "~a" (format nil "/tmp/test~a" thread)))
+(defun ddmin-list (list pred)
+  "Standard Delta Debugging: tries to remove elements from a list."
+  (let ((n 2)
+        (current list))
+    (loop
+      (let ((len (length current)))
+        (when (< len 1) (return current))
+        (when (> n len) (setf n len))
+        
+        (let ((reduced-p nil))
+          (dotimes (i n)
+            ;; Create candidate by removing a chunk
+            (let* ((chunk-size (max 1 (ceiling len n)))
+                   (start (min len (* i chunk-size)))
+                   (end (min len (+ start chunk-size)))
+                   (candidate (append (subseq current 0 start) 
+                                      (subseq current end))))
+              
+              ;; Only test if we actually removed something
+              (when (< (length candidate) (length current))
+                (when (funcall pred candidate)
+                  (setf current candidate)
+                  (setf n 2)
+                  (setf reduced-p t)
+                  (return)))))
+          
+          (unless reduced-p
+            (if (>= n len)
+                (return current)
+                (setf n (min len (* n 2))))))))))
+
+(defun reduce-tree-pass (form pred)
+  "One pass of structural reduction."
+  ;; 1. Sanity check (or base case)
+  (unless (funcall pred form)
+    (return-from reduce-tree-pass form))
+
+  (cond
+    ((consp form)
+     ;; Strategy A: Tree Descent
+     ;; Can we replace the whole parent with just one child?
+     (dolist (child form)
+       (when (funcall pred child)
+         ;; If yes, forget the parent, recurse on the child
+         (return-from reduce-tree-pass (reduce-tree-pass child pred))))
+
+     ;; Strategy B: List Reduction (Delta Debugging)
+     ;; Try removing elements from this list (e.g., removing arguments)
+     (let ((shrunk-list (ddmin-list form pred)))
+       
+       ;; Strategy C: Structural Recursion (The missing piece!)
+       ;; Now we iterate over the items of the SHRUNK list and try to reduce THEM.
+       (let ((final-list shrunk-list))
+         (loop for i from 0 below (length final-list) do
+           (let ((child (nth i final-list)))
+             (when (or (consp child) (stringp child)) ; Optimization: don't reduce symbols/numbers
+               
+               ;; Create a Contextual Predicate:
+               ;; "Does the bug still exist if we replace the i-th child of 
+               ;; final-list with Candidate?"
+               (let ((context-pred 
+                      (lambda (candidate)
+                        (funcall pred (replace-at-index final-list i candidate)))))
+                 
+                 ;; Recurse into the child using the context predicate
+                 (let ((reduced-child (reduce-tree-pass child context-pred)))
+                   ;; If the child changed, update our current list
+                   (unless (equal reduced-child child)
+                     (setf final-list (replace-at-index final-list i reduced-child))))))))
+         final-list)))
+    
+    (t form)))
+
+(defun reduce-form (form pred)
+  "Fixed-point iteration wrapper. Runs passes until code stops shrinking."
+  (let ((current form))
+    (loop
+      (let ((next (reduce-tree-pass current pred)))
+        (if (equal next current)
+            (return next)
+            (setf current next))))))
+
+
+(defun reduce-code (code inputs o-c-val o-i-val o-c-err o-i-err type-mismatch)
+  (flet ((error-eql (err1 err2)
+           (eq (type-of err1) (type-of err2))))
+    (reduce-form code
+              (lambda (reduced)
+                (when (typep reduced '(cons (eql lambda)))
+                  (let* ((*error-output* (make-broadcast-stream)) (fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+                                  (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil reduced))
+                                    (declare (ignore warn fail))
+                                    ;; (when fail
+                                    ;;   (error "~a" reduced))
+                                    fun)))
+                         (type (caddr (sb-kernel:%simple-fun-type (sb-kernel:%fun-fun fn))))
+                         (types (when (and *check-return-type*
+                                           (typep type '(cons (eql values))))
+                                  (let ((ctype (sb-kernel:values-specifier-type type)))
+                                    (sb-kernel:values-type-required ctype)))))
+                    (multiple-value-bind (c-val c-err) (safe-execute reduced
+                                                                     (lambda ()
+                                                                       (apply fn inputs)))
+                      (cond (type-mismatch
+                             (not (loop for type in types
+                                        for value in c-val
+                                        always (sb-kernel:%%typep value type))))
+                            (t
+                             ;; 2. Run Interpreted
+                             (multiple-value-bind (i-val i-err)
+                                 (safe-execute (cons 'i reduced)
+                                               (lambda ()
+                                                 (let ((sb-ext:*evaluator-mode* :interpret))
+                                                   (handler-bind (((or style-warning warning) #'muffle-warning))
+                                                     (apply (eval reduced) inputs)))))
+                               (and (values-match-p c-val o-c-val)
+                                    (values-match-p i-val o-i-val)
+                                    (error-eql c-err o-c-err)
+                                    (error-eql i-err o-i-err))))))))))))
+
+(defun to-defun (code inputs)
+  `(progn
+     (defun f ,@(cdr code))
+     (f ,@inputs)))
+
+(defun report-error (thread reason code inputs c-res i-res c-err i-err &key type-mismatch)
+  (let ((reduced (to-defun (reduce-code code inputs c-res i-res c-err i-err type-mismatch)
+                           inputs)))
+   (format t "~%!!! DETECTED DISCREPANCY !!!")
+   (format t "~%Reason: ~A" reason)
+   (format t "~%Code: ~S"  reduced)
+   (format t "~%Inputs: ~A" inputs)
+   (format t "~%Compiled Result: ~S" (or c-res c-err))
+   (format t "~%Interpret Result: ~S" (or i-res i-err))
+   (format t "~%--------------------------------------------------")
+   (save-test code reduced
+              thread)
+   (error "~a" (format nil "/tmp/test~a" thread))))
 
 (defun is-div-zero (err)
   (typep err '(or floating-point-invalid-operation
@@ -460,7 +596,7 @@
   (let ((target (random-elt *types*)))
     (multiple-value-bind (code schema) (build-random-function target)
       (when *save*
-        (save-test code thread))
+        (save-test code nil thread))
       (let* ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
                    (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil code))
                      (declare (ignore warn fail))
@@ -485,7 +621,8 @@
                               (loop for type in types
                                     for value in c-val
                                     always (sb-kernel:%%typep value type)))
-                    (report-error thread "TYPE MISMATCH" code inputs c-val type))
+                    (report-error thread "TYPE MISMATCH" code inputs c-val type nil nil
+                                  :type-mismatch t))
                   ;; 2. Run Interpreted
                   (multiple-value-bind (i-val i-err)
                       (safe-execute (cons 'i code)
@@ -506,7 +643,8 @@
                       ;; B. Both Succeeded: Check Values
                       ((and (not c-err) (not i-err))
                        (unless (values-match-p c-val i-val)
-                         (report-error thread "VALUE MISMATCH" code inputs c-val i-val)))
+                         (report-error thread "VALUE MISMATCH" code inputs c-val i-val
+                                       c-err i-err)))
 
                       ;; C. Both Errored (Non-DivZero): Check Error Types match
                       ((and c-err i-err)
@@ -521,12 +659,14 @@
                                               (subtypep c-err 'type-error))
                                          (and (eq c-err 'sb-kernel:case-failure)
                                               (subtypep i-err 'type-error))))
-                          (report-error thread "ERROR TYPE MISMATCH" code inputs c-err i-err))))
+                          (report-error thread "ERROR TYPE MISMATCH" code inputs c-val i-val
+                                        c-err i-err))))
 
                       ;; D. One Error, One Success (Non-DivZero)
                       (t
                        (report-error thread "STATUS MISMATCH (One Error/One Value)"
-                                     code inputs (or c-err c-val) (or i-err i-val))))))))))))
+                                     code inputs c-val i-val
+                                     c-err i-err)))))))))))
 
 ;;; ================================================================
 ;;; 4. MAIN LOOP
