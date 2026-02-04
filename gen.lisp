@@ -1,6 +1,7 @@
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
 (defvar *save* nil)
 (defvar *check-return-type* t)
+(defvar *the* t)
 ;;; ================================================================
 ;;; 1. CONFIGURATION & GRAMMAR
 ;;; ================================================================
@@ -19,7 +20,7 @@
 
 (defparameter *types* (list* 'boolean *integer-types*))
 (defvar *number-types*)
-(defparameter *max-depth* 6)
+(defparameter *max-depth* 7)
 
 (defvar *number-ops*
   '((+   (number number) number)
@@ -328,32 +329,54 @@
       (when (and *noise*
                  (not stop))
         (push 'noise options))
-      (case (random-elt options)
-        (const (random-const type))
-        (var   (random-elt vars))
-        (if    (let ((test (generate-ast 'boolean (1+ depth) schema))
-                     (c (generate-ast type (1+ depth) schema))
-                     (a (generate-ast type (1+ depth) schema)))
-                 (cond ;; ((eq test nil)
-                       ;;  a)
-                       ;; ((eq test t)
-                       ;;  c)
-                       ;; ((eql c a) c)
-                       (t
-                        (list 'if test c a)))))
-        (noise
-         (let ((op (random-elt *noise-ops*)))
-           (cons (first op)
-                 (loop for arg-t in (second op)
-                       collect (generate-ast (if (eq arg-t t)
-                                                 type
-                                                 arg-t) (1+ depth) schema)))))
-        (func  (if (null funcs)
-                   (random-const type)
-                   (let ((op (random-elt funcs)))
-                     (cons (first op)
-                           (loop for arg-t in (second op)
-                                 collect (generate-ast arg-t (1+ depth) schema))))))))))
+      (when (and *the*
+                 (not stop))
+        (push 'the options)
+        (push 'typecase options)
+        )
+      (flet ((gen-type ()
+               `(or ,@(loop repeat (1+ (random 5)) 
+                            for not = (zerop (random 2))
+                            for type = (random-elt *types*)
+                            collect (if not 
+                                        `(not ,type)
+                                        type)))))
+       (ecase (random-elt options)
+         (const (random-const type))
+         (var   (random-elt vars))
+         (if    (let ((test (generate-ast 'boolean (1+ depth) schema))
+                      (c (generate-ast type (1+ depth) schema))
+                      (a (generate-ast type (1+ depth) schema)))
+                  (cond ;; ((eq test nil)
+                    ;;  a)
+                    ;; ((eq test t)
+                    ;;  c)
+                    ;; ((eql c a) c)
+                    (t
+                     (list 'if test c a)))))
+         (noise
+          (let ((op (random-elt *noise-ops*)))
+            (cons (first op)
+                  (loop for arg-t in (second op)
+                        collect (generate-ast (if (eq arg-t t)
+                                                  type
+                                                  arg-t) (1+ depth) schema)))))
+         (the
+          `(the
+            ,(gen-type)
+            ,(generate-ast type (1+ depth) schema)))
+         (typecase 
+             `(typecase
+                 ,(generate-ast type (1+ depth) schema)
+                ,@(loop repeat (1+ (random 5)) 
+                        collect `(,(gen-type)
+                                  ,(generate-ast type (1+ depth) schema)))))
+         (func  (if (null funcs)
+                    (random-const type)
+                    (let ((op (random-elt funcs)))
+                      (cons (first op)
+                            (loop for arg-t in (second op)
+                                  collect (generate-ast arg-t (1+ depth) schema)))))))))))
 
 (defun build-random-function (target-type)
   (let ((schema (loop for i from 1 to 3
@@ -401,11 +424,13 @@
 
 (defun safe-execute (code func)
   "Returns (values result condition)"
+  (declare (ignorable code))
   (handler-case
-      (handler-bind ((sb-sys:memory-fault-error (lambda (c)
-                                                  (with-standard-io-syntax
-                                                    (princ code))
-                                                  (break "~a" c))))
+      (handler-bind (;; (sb-sys:memory-fault-error (lambda (c)
+                     ;;                              (with-standard-io-syntax
+                     ;;                                (princ code))
+                     ;;                              (break "~a" c)))
+                     )
         (values (multiple-value-list (funcall func)) nil))
     (error (c) (values nil c))))
 
@@ -467,7 +492,8 @@
                                     (lambda ()
                                       #+sbcl
                                       (let ((sb-ext:*evaluator-mode* :interpret))
-                                        (apply (eval code) inputs))
+                                        (handler-bind (((or style-warning warning) #'muffle-warning))
+                                          (apply (eval code) inputs)))
                                       #-sbcl
                                       (apply (eval code) inputs)))
 
@@ -484,10 +510,18 @@
 
                       ;; C. Both Errored (Non-DivZero): Check Error Types match
                       ((and c-err i-err)
-                       (unless (or (eq (type-of c-err) (type-of i-err))
-                                   (subtypep (type-of c-err) (type-of i-err))
-                                   (subtypep (type-of i-err) (type-of c-err)))
-                         (report-error thread "ERROR TYPE MISMATCH" code inputs c-err i-err)))
+                       (let ((c-err (type-of c-err))
+                             (i-err (type-of i-err)))
+                        (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
+                                              (eq i-err 'sb-sys:memory-fault-error)))
+                                     (or (eq c-err i-err)
+                                         (subtypep c-err i-err)
+                                         (subtypep i-err c-err)
+                                         (and (eq i-err 'sb-kernel:case-failure)
+                                              (subtypep c-err 'type-error))
+                                         (and (eq c-err 'sb-kernel:case-failure)
+                                              (subtypep i-err 'type-error))))
+                          (report-error thread "ERROR TYPE MISMATCH" code inputs c-err i-err))))
 
                       ;; D. One Error, One Success (Non-DivZero)
                       (t
@@ -498,7 +532,7 @@
 ;;; 4. MAIN LOOP
 ;;; ================================================================
 
-(defun main (&key (threads 12) float depth rational number
+(defun main (&key (threads 12) float depth rational (number t)
                   noise
                   save)
   (setf *random-state* (make-random-state t))
@@ -529,12 +563,12 @@
       (let ((threads
               (loop for i below threads
                     collect
-                    (sb-thread:make-thread
-                     (let ((i i))
+                    (let ((i i))
+                      (sb-thread:make-thread
                        (lambda ()
                          (loop
-                          (run-test i))))
-                     :name "random"))))
+                          (run-test i)))
+                       :name (format nil "random ~a" i))))))
         (unwind-protect (mapcar (lambda (th)
                                   (sb-thread:join-thread th :default nil)) threads)
           (mapcar (lambda (th)
