@@ -56,6 +56,7 @@
     (exp (integer) number)
     (log (integer) number)
     (log (integer number) number)
+    (signum (number) number)
 
     (+   (number integer) number)
     (-   (number integer) number)
@@ -64,10 +65,13 @@
 
     (>   (number number) boolean)
     (<   (number number) boolean)
+    (>=   (number number) boolean)
+    (<=   (number number) boolean)
     (=   (number number) boolean)
     (eql   (number number) boolean)
     (equal   (number number) boolean)
-    (equalp   (number number) boolean)))
+    (equalp   (number number) boolean)
+    (sqrt (number) number)))
 
 (defvar *float-ops*
   '((+   (single-float single-float) single-float)
@@ -166,7 +170,7 @@
     (cos (rational) single-float)
     (cos (integer) single-float)
 
-    ;; (expt (rational rational) number)
+    (expt (rational (integer -100 100)) number)
     (exp (rational) number)
     (log (rational) number)
     (log (rational rational) number)
@@ -174,7 +178,7 @@
     (exp (integer) number)
     (log (integer) number)
     (log (integer rational) number)
-
+    (isqrt (integer) integer)
     (+   (rational integer) rational)
     (-   (rational integer) rational)
     (*   (rational integer) rational)
@@ -182,6 +186,12 @@
 
     (>   (rational rational) boolean)
     (<   (rational rational) boolean)))
+
+(defmacro %ldb (size pos i)
+  `(ldb (byte (the sb-bignum:bit-index ,size) (the sb-bignum:bit-index ,pos)) ,i))
+
+(defmacro %dpb (n size pos i)
+  `(dpb ,n (byte (the sb-bignum:bit-index ,size) (the sb-bignum:bit-index ,pos)) ,i))
 
 (defparameter *operators*
   `(;; Integer
@@ -198,6 +208,7 @@
     (logxor (integer integer) integer)
     (logior (integer integer) integer)
     (lognot (integer) integer)
+    (logtest (integer integer) boolean)
     (integer-length (integer) integer)
     (logcount (integer) integer)
     (max (integer integer) integer)
@@ -206,8 +217,10 @@
     (evenp (integer) boolean)
     (oddp (integer) boolean)
     (ash (integer (integer -256 256)) integer)
+    (%ldb ((integer 0 256) (integer 0 256) integer) integer)
+    (%dpb (integer (integer 0 256) (integer 0 256) integer) integer)
 
-
+    (gcd (integer integer) integer)
     ;; Comparison
     (>   (integer integer)           boolean)
     (<   (integer integer)           boolean)
@@ -309,9 +322,10 @@
             (1+ (if (< (random 100) 30)
                     (random 100)
                     (random (expt 2 max-integer)))))
-           ((equal type '(integer -256 256))
-            (* (random 257)
-               (if (zerop (random 2)) 1 -1)))))))
+           ((typep type '(cons (eql integer)))
+            (destructuring-bind (lo hi) (cdr type)
+              (+ (random (1+ (- hi lo)))
+                 lo)))))))
 
 (defvar *noise* nil)
 (defvar *blocks* nil)
@@ -331,6 +345,7 @@
                  (not stop))
         (push 'noise options)
         (push 'block options)
+        (push 'nth-value options)
         (when *blocks*
           (push 'return-from options)))
       (when (and *the*
@@ -390,6 +405,9 @@
           (return-from
            `(return-from ,(random-elt *blocks*)
               ,(generate-ast type (1+ depth) schema)))
+          (nth-value
+           `(nth-value ,(random 5)
+                      ,(generate-ast type (1+ depth) schema)))
           (func  (if (null funcs)
                      (random-const type)
                      (let ((op (random-elt funcs)))
@@ -460,90 +478,73 @@
                       :if-does-not-exist :create :if-exists :supersede
                       :direction :output)
     (write reduced :stream st)
-    (terpri)
+    (terpri st)
     (write code :stream st)))
 
 (defun replace-at-index (list index new-value)
-  "Functionally returns a new list with the item at INDEX replaced by NEW-VALUE."
   (loop for item in list
         for i from 0
         collect (if (= i index) new-value item)))
 
 (defun ddmin-list (list pred)
-  "Standard Delta Debugging: tries to remove elements from a list."
-  (let ((n 2)
-        (current list))
+  (let ((n 2) (current list))
     (loop
       (let ((len (length current)))
         (when (< len 1) (return current))
         (when (> n len) (setf n len))
-
         (let ((reduced-p nil))
           (dotimes (i n)
-            ;; Create candidate by removing a chunk
             (let* ((chunk-size (max 1 (ceiling len n)))
                    (start (min len (* i chunk-size)))
                    (end (min len (+ start chunk-size)))
-                   (candidate (append (subseq current 0 start)
-                                      (subseq current end))))
-
-              ;; Only test if we actually removed something
+                   (candidate (append (subseq current 0 start) (subseq current end))))
               (when (< (length candidate) (length current))
                 (when (funcall pred candidate)
                   (setf current candidate)
                   (setf n 2)
                   (setf reduced-p t)
                   (return)))))
-
           (unless reduced-p
-            (if (>= n len)
-                (return current)
-                (setf n (min len (* n 2))))))))))
+            (if (>= n len) (return current) (setf n (min len (* n 2))))))))))
 
 (defun reduce-tree-pass (form pred)
-  "One pass of structural reduction."
-  ;; 1. Sanity check (or base case)
-  (unless (funcall pred form)
-    (return-from reduce-tree-pass form))
+  (unless (funcall pred form) (return-from reduce-tree-pass form))
 
   (cond
     ((consp form)
-     ;; Strategy A: Tree Descent
-     ;; Can we replace the whole parent with just one child?
-     (dolist (child form)
-       (when (funcall pred child)
-         ;; If yes, forget the parent, recurse on the child
-         (return-from reduce-tree-pass (reduce-tree-pass child pred))))
+     ;; STRATEGY A: DEEP TREE DESCENT
+     ;; Try replacing 'form' with a child, OR a grandchild.
+     ;; This handles (COND ((NTH ...))) -> (NTH ...)
+     (let ((candidates nil))
+       (dolist (child form)
+         (push child candidates)       ; Add Child
+         (when (consp child)
+           (dolist (grandchild child)
+             (push grandchild candidates)))) ; Add Grandchild
+       
+       (dolist (candidate (nreverse candidates))
+         (when (funcall pred candidate)
+           ;; Found a simplified descendant that reproduces the bug
+           (return-from reduce-tree-pass (reduce-tree-pass candidate pred)))))
 
-     ;; Strategy B: List Reduction (Delta Debugging)
-     ;; Try removing elements from this list (e.g., removing arguments)
+     ;; STRATEGY B: LIST REDUCTION (DDMin)
      (let ((shrunk-list (ddmin-list form pred)))
-
-       ;; Strategy C: Structural Recursion (The missing piece!)
-       ;; Now we iterate over the items of the SHRUNK list and try to reduce THEM.
+       
+       ;; STRATEGY C: STRUCTURAL RECURSION
        (let ((final-list shrunk-list))
          (loop for i from 0 below (length final-list) do
            (let ((child (nth i final-list)))
-             (when (or (consp child) (stringp child)) ; Optimization: don't reduce symbols/numbers
-
-               ;; Create a Contextual Predicate:
-               ;; "Does the bug still exist if we replace the i-th child of
-               ;; final-list with Candidate?"
-               (let ((context-pred
+             (when (or (consp child) (stringp child))
+               (let ((context-pred 
                       (lambda (candidate)
                         (funcall pred (replace-at-index final-list i candidate)))))
-
-                 ;; Recurse into the child using the context predicate
                  (let ((reduced-child (reduce-tree-pass child context-pred)))
-                   ;; If the child changed, update our current list
                    (unless (equal reduced-child child)
                      (setf final-list (replace-at-index final-list i reduced-child))))))))
          final-list)))
-
     (t form)))
 
 (defun reduce-form (form pred)
-  "Fixed-point iteration wrapper. Runs passes until code stops shrinking."
   (let ((current form))
     (loop
       (let ((next (reduce-tree-pass current pred)))
@@ -603,8 +604,10 @@
                                                       (let ((sb-ext:*evaluator-mode* :interpret))
                                                         (handler-bind (((or style-warning warning) #'muffle-warning))
                                                           (apply (eval reduced) inputs)))))
-                                    (and (eq (type-of c-err) o-c-err)
-                                         (eq (type-of i-err) o-i-err)
+                                    (and (or (not (or o-c-err c-err))
+                                             (eq (type-of c-err) (type-of o-c-err)))
+                                         (or (not (or o-i-err i-err))
+                                             (eq (type-of i-err) (type-of o-i-err)))
                                          (or (not (or c-val i-val))
                                              (not (values-match-p c-val i-val)))))))))))))))
 
