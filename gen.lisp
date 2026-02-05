@@ -521,7 +521,7 @@
          (when (consp child)
            (dolist (grandchild child)
              (push grandchild candidates)))) ; Add Grandchild
-       
+
        (dolist (candidate (nreverse candidates))
          (when (funcall pred candidate)
            ;; Found a simplified descendant that reproduces the bug
@@ -529,13 +529,13 @@
 
      ;; STRATEGY B: LIST REDUCTION (DDMin)
      (let ((shrunk-list (ddmin-list form pred)))
-       
+
        ;; STRATEGY C: STRUCTURAL RECURSION
        (let ((final-list shrunk-list))
          (loop for i from 0 below (length final-list) do
            (let ((child (nth i final-list)))
              (when (or (consp child) (stringp child))
-               (let ((context-pred 
+               (let ((context-pred
                       (lambda (candidate)
                         (funcall pred (replace-at-index final-list i candidate)))))
                  (let ((reduced-child (reduce-tree-pass child context-pred)))
@@ -577,7 +577,7 @@
                      (when (and (typep reduced '(cons (eql lambda) (cons cons)))
                                 (= (length (second reduced)) n-args)
                                 (every #'symbolp (second reduced)))
-                       (let* ((*error-output* (make-broadcast-stream)) 
+                       (let* ((*error-output* (make-broadcast-stream))
                               (fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
                                     (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil reduced))
                                       (declare (ignore warn fail))
@@ -610,6 +610,20 @@
                                              (eq (type-of i-err) (type-of o-i-err)))
                                          (or (not (or c-val i-val))
                                              (not (values-match-p c-val i-val)))))))))))))))
+
+(defun reduce-timeout (code &optional (timeout 0.5))
+  (reduce-form code
+               (lambda (reduced)
+                 (when (and (typep reduced '(cons (eql lambda) (cons cons)))
+                            (every #'symbolp (second reduced)))
+                   (let* ((*error-output* (make-broadcast-stream)))
+                     (block nil
+                       (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
+                                      (sb-ext:timeout
+                                        (lambda (c)
+                                          (return c))))
+                         (sb-ext:with-timeout timeout (compile nil reduced))
+                         nil)))))))
 
 (defun to-defun (code inputs)
   `(progn
