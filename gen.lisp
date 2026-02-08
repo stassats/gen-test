@@ -132,7 +132,10 @@
     (values (t t) t)
     (values (t t t) t)
     (values (t t t t) t)
-    (values (t t t t t) t)))
+    (values (t t t t t) t)
+    (progn (t t) t)
+    (prog1 (t t) t)
+    (list (t) t)))
 
 (defvar *ratio-ops*
   '((+   (rational rational) rational)
@@ -329,6 +332,10 @@
 
 (defvar *noise* nil)
 (defvar *blocks* nil)
+(defvar *vars* nil)
+
+(defun call (x)
+  (funcall x))
 
 (defun generate-ast (type depth schema)
   (let ((terminals (unless (or (eq type 'boolean)
@@ -346,6 +353,8 @@
         (push 'noise options)
         (push 'block options)
         (push 'nth-value options)
+        (push 'let options)
+        (push 'closure options)
         (when *blocks*
           (push 'return-from options)))
       (when (and *the*
@@ -402,12 +411,26 @@
                 `(block ,block
                    ,@(loop repeat (1+ (random 3))
                            collect (generate-ast type (1+ depth) schema)))))
+          (let
+              (if (and *vars*
+                       (zerop (random 2)))
+                  (if (zerop (random 2))
+                      (random-elt *vars*)
+                      `(setf ,(random-elt *vars*)
+                             (generate-ast type (+ depth 2) schema)))
+                  (let* ((var (gentemp))
+                         (*vars* (cons var *vars*)))
+                    `(let ((,var (generate-ast type (+ depth 2) schema)))
+                       (generate-ast type (1+ depth) schema)))))
           (return-from
            `(return-from ,(random-elt *blocks*)
               ,(generate-ast type (1+ depth) schema)))
           (nth-value
            `(nth-value ,(random 5)
                       ,(generate-ast type (1+ depth) schema)))
+          (closure
+           `(call (lambda ()
+                    ,(generate-ast type (1+ depth) schema))))
           (func  (if (null funcs)
                      (random-const type)
                      (let ((op (random-elt funcs)))
@@ -446,7 +469,7 @@
     (t (and (= (length val1) (length val2))
             (loop for v1 in val1
                   for v2 in val2
-                  always (or (eql v1 v2)
+                  always (or (equal v1 v2)
                              #+(and arm64 (not darwin))
                              (or (and (floatp v1) (sb-ext:float-nan-p v1))
                                  (and (floatp v2)
@@ -569,7 +592,13 @@
 
 (defun reduce-code (code inputs o-c-val o-i-val o-c-err o-i-err type-mismatch)
   (declare (ignore o-c-val o-i-val))
-  (let ((n-args (length inputs)))
+  (let ((n-args (length inputs))
+        (o-c-err (if (typep o-c-err 'condition)
+                     (type-of o-c-err)
+                     o-c-err))
+        (o-i-err (if (typep o-i-err 'condition)
+                     (type-of o-i-err)
+                     o-i-err)))
     (format t "Reducing~%")
     (sb-ext:with-timeout 200
       (reduce-form code
@@ -605,9 +634,9 @@
                                                         (handler-bind (((or style-warning warning) #'muffle-warning))
                                                           (apply (eval reduced) inputs)))))
                                     (and (or (not (or o-c-err c-err))
-                                             (eq (type-of c-err) (type-of o-c-err)))
+                                             (eq (type-of c-err) o-c-err))
                                          (or (not (or o-i-err i-err))
-                                             (eq (type-of i-err) (type-of o-i-err)))
+                                             (eq (type-of i-err) o-i-err))
                                          (or (not (or c-val i-val))
                                              (not (values-match-p c-val i-val)))))))))))))))
 
