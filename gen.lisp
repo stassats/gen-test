@@ -611,6 +611,19 @@
                                          (or (not (or c-val i-val))
                                              (not (values-match-p c-val i-val)))))))))))))))
 
+(defun reduce-compiler-error (code)
+  (sb-ext:with-timeout 200
+    (reduce-form code
+                 (lambda (reduced)
+                   (when (and (typep reduced '(cons (eql lambda) (cons cons)))
+                              (every #'symbolp (second reduced)))
+                     (let* ((*error-output* (make-broadcast-stream)))
+                       (block nil
+                         (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
+                                        (error (lambda (c) (return c))))
+                           (sb-ext:with-timeout 120 (compile nil reduced))
+                           nil))))))))
+
 (defun reduce-timeout (code &optional (timeout 0.5))
   (reduce-form code
                (lambda (reduced)
@@ -625,10 +638,12 @@
                          (sb-ext:with-timeout timeout (compile nil reduced))
                          nil)))))))
 
-(defun to-defun (code inputs)
-  `(progn
-     (defun f ,@(cdr code))
-     (f ,@inputs)))
+(defun to-defun (code &optional inputs)
+  (if inputs
+      `(progn
+         (defun f ,@(cdr code))
+         (f ,@inputs))
+      `(defun f ,@(cdr code))))
 
 (defun report-error (thread reason code inputs c-res i-res c-err i-err &key type-mismatch)
   (let ((reduced (to-defun (reduce-code code inputs c-res i-res c-err i-err type-mismatch)
@@ -644,6 +659,15 @@
               thread)
    (error "~a" (format nil "/tmp/test~a" thread))))
 
+(defun report-compiler-error (thread code error)
+  (let ((reduced (to-defun (reduce-compiler-error code))))
+   (format t "~%!!! COMPILER ERROR !!!")
+   (format t "~%Reason: ~A" error)
+   (format t "~%Code: ~S"  reduced)
+   (format t "~%--------------------------------------------------")
+   (save-test code reduced thread)
+   (error "~a" (format nil "/tmp/test~a" thread))))
+
 (defun is-div-zero (err)
   (typep err '(or floating-point-invalid-operation
                floating-point-overflow
@@ -654,12 +678,15 @@
     (multiple-value-bind (code schema) (build-random-function target)
       (when *save*
         (save-test code nil thread))
-      (let* ((fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
-                   (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil code))
-                     (declare (ignore warn fail))
-                     ;; (when fail
-                     ;;   (error "~a" code))
-                     fun)))
+      (let* ((fn (handler-case 
+                     (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+                       (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil code))
+                         (declare (ignore warn fail))
+                         ;; (when fail
+                         ;;   (error "~a" code))
+                         fun))
+                   (error (c)
+                     (return-from run-test (report-compiler-error thread code c)))))
              (type (caddr (sb-kernel:%simple-fun-type fn)))
              (types (when (and *check-return-type*
                                (typep type '(cons (eql values))))
