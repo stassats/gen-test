@@ -391,9 +391,20 @@
                                                    type
                                                    arg-t) (1+ depth) schema)))))
           (the
-           `(the
-             ,(gen-type)
-             ,(generate-ast type (1+ depth) schema)))
+           (let ((rest (zerop (random 4))))
+             (if rest
+                 `(the
+                   (values ,@(loop repeat (random 2)
+                                   collect (gen-type))
+                           &optional
+                           ,@(loop repeat (1+ (random 2))
+                                   collect (gen-type))
+                           &rest ,(gen-type))
+                   ,(generate-ast type (1+ depth) schema))
+                 `(the
+                   (values ,@(loop repeat (random 5)
+                                   collect (gen-type)))
+                   ,(generate-ast type (1+ depth) schema)))))
           (typecase
               `(typecase
                    ,(generate-ast type (1+ depth) schema)
@@ -416,12 +427,13 @@
                        (zerop (random 2)))
                   (if (zerop (random 2))
                       (random-elt *vars*)
-                      `(setf ,(random-elt *vars*)
-                             (generate-ast type (+ depth 2) schema)))
+                      `(setq ,(random-elt *vars*)
+                             ,(generate-ast type (+ depth 2) schema)))
                   (let* ((var (gentemp))
+                         (value (generate-ast type (+ depth 2) schema))
                          (*vars* (cons var *vars*)))
-                    `(let ((,var (generate-ast type (+ depth 2) schema)))
-                       (generate-ast type (1+ depth) schema)))))
+                    `(let ((,var ,value))
+                       ,(generate-ast type (1+ depth) schema)))))
           (return-from
            `(return-from ,(random-elt *blocks*)
               ,(generate-ast type (1+ depth) schema)))
@@ -431,12 +443,12 @@
           (closure
            `(call (lambda ()
                     ,(generate-ast type (1+ depth) schema))))
-          (func  (if (null funcs)
-                     (random-const type)
-                     (let ((op (random-elt funcs)))
-                       (cons (first op)
-                             (loop for arg-t in (second op)
-                                   collect (generate-ast arg-t (1+ depth) schema)))))))))))
+          (func (if (null funcs)
+                    (random-const type)
+                    (let ((op (random-elt funcs)))
+                      (cons (first op)
+                            (loop for arg-t in (second op)
+                                  collect (generate-ast arg-t (1+ depth) schema)))))))))))
 
 (defun build-random-function (target-type)
   (let* ((schema (loop for i from 1 to 3
