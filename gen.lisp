@@ -1,3 +1,4 @@
+(in-package :cl-user)
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
 (defvar *save* nil)
 (defvar *check-return-type* t)
@@ -74,55 +75,55 @@
     (sqrt (number) number)))
 
 (defvar *float-ops*
-  '((+   (single-float single-float) single-float)
-    (-   (single-float single-float) single-float)
-    (-   (single-float) single-float)
-    (*   (single-float single-float) single-float)
-    (/   (single-float single-float) single-float)
-    (truncate (single-float single-float) integer)
-    (ceiling (single-float single-float) integer)
-    (round (single-float single-float) integer)
+  '((+   (float float) float)
+    (-   (float float) float)
+    (-   (float) float)
+    (*   (float float) float)
+    (/   (float float) float)
+    (truncate (float float) integer)
+    (ceiling (float float) integer)
+    (round (float float) integer)
 
-    (ffloor (single-float single-float) single-float)
-    (ftruncate (single-float single-float) single-float)
-    (fceiling (single-float single-float) single-float)
-    (fround (single-float single-float) single-float)
+    (ffloor (float float) float)
+    (ftruncate (float float) float)
+    (fceiling (float float) float)
+    (fround (float float) float)
 
-    (truncate (single-float) integer)
-    (ceiling (single-float) integer)
-    (round (single-float) integer)
+    (truncate (float) integer)
+    (ceiling (float) integer)
+    (round (float) integer)
 
-    (ffloor (single-float) single-float)
-    (ftruncate (single-float) single-float)
-    (fceiling (single-float) single-float)
-    (fround (single-float) single-float)
+    (ffloor (float) float)
+    (ftruncate (float) float)
+    (fceiling (float) float)
+    (fround (float) float)
 
-    (max (single-float single-float) single-float)
-    (min (single-float single-float) single-float)
-    (abs (single-float) single-float)
+    (max (float float) float)
+    (min (float float) float)
+    (abs (float) float)
 
-    (sin (single-float) single-float)
-    (sin (integer) single-float)
-    (cos (single-float) single-float)
-    (cos (integer) single-float)
+    (sin (float) float)
+    (sin (integer) float)
+    (cos (float) float)
+    (cos (integer) float)
 
-    (expt (single-float single-float) number)
-    (exp (single-float) number)
-    (log (single-float) number)
-    (log (single-float single-float) number)
+    (expt (float float) number)
+    (exp (float) number)
+    (log (float) number)
+    (log (float float) number)
 
-    (expt (integer single-float) number)
+    (expt (integer float) number)
     (exp (integer) number)
     (log (integer) number)
-    (log (integer single-float) number)
+    (log (integer float) number)
 
-    (+   (single-float integer) single-float)
-    (-   (single-float integer) single-float)
-    (*   (single-float integer) single-float)
-    (/   (single-float integer) single-float)
+    (+   (float integer) float)
+    (-   (float integer) float)
+    (*   (float integer) float)
+    (/   (float integer) float)
 
-    (>   (single-float single-float) boolean)
-    (<   (single-float single-float) boolean)))
+    (>   (float float) boolean)
+    (<   (float float) boolean)))
 
 (defparameter *noise-ops*
   '((unwind-protect (t t) t)
@@ -255,8 +256,8 @@
 
 (defun random-const (type)
   (case type
-    (number
-     (random-const (random-elt *number-types*)))
+    (number (random-const (random-elt *number-types*)))
+    (real (random-const (random-elt '(rational float))))
     (integer (* (if (< (random 100) 30)
                     (random 100)
                     (random (expt 2 max-integer)))
@@ -264,7 +265,15 @@
     (unsigned-byte (if (< (random 100) 30)
                        (random 100)
                        (random (expt 2 max-integer))))
-    (single-float (* (random 100000.0)
+    (float
+     (random-const (random-elt '(double-float single-float))))
+    (single-float (* (if (zerop (random 2))
+                         (float (random (expt 2 64)) 1f0)
+                         (scale-float 1f0 (random 100)))
+                     (if (zerop (random 2)) 1 -1)))
+    (double-float (* (if (zerop (random 2))
+                         (float (random (expt 2 64)) 1d0)
+                         (scale-float 1d0 (random 100)))
                      (if (zerop (random 2)) 1 -1)))
     (boolean      (if (zerop (random 2)) nil t))
     (fixnum (* (random (if (< (random 100) 50)
@@ -278,7 +287,8 @@
                (1+ (random (expt 2 max-integer))))
             (if (zerop (random 2)) 1 -1))))
     (complex
-     (random-const (random-elt '((complex rational) (complex single-float)))))
+     (random-const (random-elt '((complex rational) (complex single-float)
+                                 (complex double-float)))))
     (t
      (cond ((equal type '(complex rational))
             (complex (random-const 'rational)
@@ -288,6 +298,13 @@
            ((equal type '(complex single-float))
             (complex (random-const 'single-float)
                      (random-const 'single-float)))
+           ((equal type '(complex double-float))
+            (complex (random-const 'double-float)
+                     (random-const 'double-float)))
+           ((equal type '(complex float))
+            (let ((type (random-elt '(single-float double-float))))
+              (complex (random-const type)
+                       (random-const type))))
            ((equal type '(signed-byte #.sb-vm:n-word-bits))
                (* (if (< (random 100) 50)
                       (1+ (random 100))
@@ -612,7 +629,7 @@
                      (type-of o-i-err)
                      o-i-err)))
     (format t "Reducing~%")
-    (sb-ext:with-timeout 200
+    (sb-ext:with-timeout 400
       (reduce-form code
                    (lambda (reduced)
                      (when (and (typep reduced '(cons (eql lambda) (cons cons)))
@@ -653,7 +670,7 @@
                                              (not (values-match-p c-val i-val)))))))))))))))
 
 (defun reduce-compiler-error (code)
-  (sb-ext:with-timeout 200
+  (sb-ext:with-timeout 400
     (reduce-form code
                  (lambda (reduced)
                    (when (and (typep reduced '(cons (eql lambda) (cons cons)))
@@ -663,6 +680,20 @@
                          (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
                                         (error (lambda (c) (return c))))
                            (sb-ext:with-timeout 120 (compile nil reduced))
+                           nil))))))))
+
+(defun reduce-memfault (code args)
+  (sb-ext:with-timeout 400
+    (reduce-form code
+                 (lambda (reduced)
+                   (when (and (typep reduced '(cons (eql lambda) (cons cons)))
+                              (every #'symbolp (second reduced)))
+                     (let* ((*error-output* (make-broadcast-stream)))
+                       (block nil
+                         (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
+                                        (sb-sys:memory-fault-error (lambda (c) (return c))))
+                           (apply (sb-ext:with-timeout 120 (compile nil reduced))
+                                   args)
                            nil))))))))
 
 (defun reduce-timeout (code &optional (timeout 0.5))
@@ -709,10 +740,23 @@
    (save-test code reduced thread)
    (error "~a" (format nil "/tmp/test~a" thread))))
 
-(defun is-div-zero (err)
-  (typep err '(or floating-point-invalid-operation
-               floating-point-overflow
-               division-by-zero)))
+(defun report-memory-fault (thread code inputs)
+  (let ((reduced (to-defun (reduce-memfault code inputs)
+                           inputs)))
+    (format t "~%!!! MEMORY FAULT !!!")
+    (format t "~%Code: ~S"  reduced)
+    (format t "~%Inputs: ~A" inputs)
+    (format t "~%--------------------------------------------------")
+    (save-test code reduced thread)
+    (error "~a" (format nil "/tmp/test~a" thread))))
+
+(defun is-arithmetic-error (err)
+  (or (typep err '(or floating-point-invalid-operation
+                   floating-point-overflow
+                   division-by-zero))
+      (and (typep err 'simple-error)
+           (equal (simple-condition-format-control err)
+                  "can't represent result of left shift"))))
 
 (defun run-test (thread)
   (let ((target (random-elt *types*)))
@@ -762,7 +806,7 @@
                     ;; 3. Compare (Filtering Logic)
                     (cond
                       ;; A. If either failed due to Div-By-Zero, Ignore completely.
-                      ((or (is-div-zero c-err) (is-div-zero i-err))
+                      ((or (is-arithmetic-error c-err) (is-arithmetic-error i-err))
                        nil)
 
                       ;; B. Both Succeeded: Check Values
@@ -770,22 +814,23 @@
                        (unless (values-match-p c-val i-val)
                          (report-error thread "VALUE MISMATCH" code inputs c-val i-val
                                        c-err i-err)))
-
                       ;; C. Both Errored (Non-DivZero): Check Error Types match
                       ((and c-err i-err)
                        (let ((c-err (type-of c-err))
                              (i-err (type-of i-err)))
-                        (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
-                                              (eq i-err 'sb-sys:memory-fault-error)))
-                                     (or (eq c-err i-err)
-                                         (subtypep c-err i-err)
-                                         (subtypep i-err c-err)
-                                         (and (eq i-err 'sb-kernel:case-failure)
-                                              (subtypep c-err 'type-error))
-                                         (and (eq c-err 'sb-kernel:case-failure)
-                                              (subtypep i-err 'type-error))))
-                          (report-error thread "ERROR TYPE MISMATCH" code inputs c-val i-val
-                                        c-err i-err))))
+                         (if (eq c-err 'sb-sys:memory-fault-error)
+                             (report-memory-fault thread code inputs)
+                             (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
+                                                   (eq i-err 'sb-sys:memory-fault-error)))
+                                          (or (eq c-err i-err)
+                                              (subtypep c-err i-err)
+                                              (subtypep i-err c-err)
+                                              (and (eq i-err 'sb-kernel:case-failure)
+                                                   (subtypep c-err 'type-error))
+                                              (and (eq c-err 'sb-kernel:case-failure)
+                                                   (subtypep i-err 'type-error))))
+                               (report-error thread "ERROR TYPE MISMATCH" code inputs c-val i-val
+                                             c-err i-err)))))
 
                       ;; D. One Error, One Success (Non-DivZero)
                       (t
@@ -809,18 +854,23 @@
     (setf *max-depth* depth))
   (when float
     (setf *operators* (append *operators* *float-ops*))
-    (push 'single-float *types*))
+    (push 'float *types*))
   (when rational
     (setf *operators* (append *operators* *ratio-ops*))
     (push 'rational *types*))
   (when number
     (setf *operators* (append *operators* *number-ops*))
+    (push 'real *types*)
+    (push 'float *types*)
     (push 'single-float *types*)
+    (push 'double-float *types*)
     (push 'rational *types*)
     (push 'number *types*)
     (push 'complex *types*)
     (push '(complex rational) *types*)
+    (push '(complex float) *types*)
     (push '(complex single-float) *types*)
+    (push '(complex double-float) *types*)
     (setf *number-types* (remove 'boolean *types*)))
   (if (= threads 1)
       (loop
