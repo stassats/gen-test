@@ -1,5 +1,6 @@
 (in-package :cl-user)
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
+(defvar *thread* 0)
 (defvar *save* nil)
 (defvar *check-return-type* t)
 (defvar *the* t)
@@ -526,7 +527,7 @@
                   collect `(declare (type ,(if nil;(> (random 100) 60)
                                                t
                                                t-name) ,v))))
-        (declare (optimize (safety 1) (speed 1)))
+        
         ,body)
      schema)))
 
@@ -556,25 +557,17 @@
                                   (and (floatp v2)
                                        (sb-ext:float-nan-p v2)))))))))
 
-(defun safe-execute (code func)
-  "Returns (values result condition)"
-  (declare (ignorable code))
-  (handler-case
-      (handler-bind (;; (sb-sys:memory-fault-error (lambda (c)
-                     ;;                              (with-standard-io-syntax
-                     ;;                                (princ code))
-                     ;;                              (break "~a" c)))
-                     )
-        (values (multiple-value-list (funcall func)) nil))
-    (error (c) (values nil c))))
+(defun safe-execute (func args)
+  (ignore-errors (multiple-value-list (apply func args))))
 
-(defun save-test (code reduced thread)
-  (with-open-file (st (format nil "/tmp/test~a" thread)
+(defun save-test (code reduced)
+  (with-open-file (st (format nil "/tmp/test~a.lisp" *thread*)
                       :if-does-not-exist :create :if-exists :supersede
                       :direction :output)
     (write reduced :stream st)
     (terpri st)
-    (write code :stream st)))
+    (write code :stream st)
+    (pathname st)))
 
 (defun replace-at-index (list index new-value)
   (loop for item in list
@@ -648,6 +641,35 @@
             (setf current next))))))
 
 
+(declaim (notinline report-compiler-error report-compiler-error))
+
+(defun compile-code (code)
+  (handler-case 
+      (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+        (multiple-value-bind (fun warn fail) 
+            (sb-ext:with-timeout 120 (compile nil code))
+          (declare (ignore warn fail))
+          ;; (when fail
+          ;;   (error "~a" code))
+          (values fun
+                  (when *check-return-type*
+                    (let* ((type (sb-kernel:%simple-fun-type fun))
+                           (type (and (consp type)
+                                      (caddr type))))
+                      (when (typep type '(cons (eql values)))
+                        (let ((ctype (sb-kernel:values-specifier-type type)))
+                          (sb-kernel:values-type-required ctype))))))))
+    (error (c)
+      (report-compiler-error code c))))
+
+(defun interpret-code (code)
+  (handler-case 
+      (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
+        (sb-ext:with-timeout 120
+          (let ((sb-ext:*evaluator-mode* :interpret))
+            (eval code))))
+    (error (c)
+      (report-compiler-error code c))))
 
 (defun error-equal (err1 err2)
   (let ((err1 (type-of err1))
@@ -682,60 +704,44 @@
          (f ,@inputs))
       `(defun f ,@(cdr code))))
 
-(defun report-compiler-error (thread code error)
+(defun report-compiler-error (code error)
   (let ((reduced (to-defun (reduce-compiler-error code))))
    (format t "~%!!! COMPILER ERROR !!!")
    (format t "~%Reason: ~A" error)
    (format t "~%Code: ~S"  reduced)
    (format t "~%--------------------------------------------------")
-   (save-test code reduced thread)
-   (error "~a" (format nil "/tmp/test~a" thread))))
+   (error "~a" (save-test code reduced))))
 
-(defun reduce-code (thread code inputs o-c-val o-i-val o-c-err o-i-err type-mismatch)
+(defun reduce-code (code inputs o-c-val o-i-val o-c-err o-i-err type-mismatch)
   (declare (ignore o-c-val o-i-val))
   (let ((n-args (length inputs))
+        (*error-output* (make-broadcast-stream))
         (o-c-err (if (typep o-c-err 'condition)
                      (type-of o-c-err)
                      o-c-err))
         (o-i-err (if (typep o-i-err 'condition)
                      (type-of o-i-err)
                      o-i-err)))
-    (format t "Reducing~%")
+    (format t "Reducing ~a~%" (save-test (to-defun code inputs) nil))
     (sb-ext:with-timeout 400
       (reduce-form code
                    (lambda (reduced)
                      (when (and (typep reduced '(cons (eql lambda) (cons cons)))
                                 (= (length (second reduced)) n-args)
                                 (every #'symbolp (second reduced)))
-                       (let* ((*error-output* (make-broadcast-stream))
-                              (fn (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
-                                                 (error (lambda (c) 
-                                                          (report-compiler-error thread code c))))
-                                    (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil reduced))
-                                      (declare (ignore warn fail))
-                                      ;; (when fail
-                                      ;;   (error "~a" reduced))
-                                      fun)))
-                              (type (caddr (sb-kernel:%simple-fun-type (sb-kernel:%fun-fun fn))))
-                              (types (when (and *check-return-type*
-                                                (typep type '(cons (eql values))))
-                                       (let ((ctype (sb-kernel:values-specifier-type type)))
-                                         (sb-kernel:values-type-required ctype)))))
-                         (multiple-value-bind (c-val c-err) (safe-execute reduced
-                                                                          (lambda ()
-                                                                            (apply fn inputs)))
+                       (multiple-value-bind (fn types)
+                           (compile-code reduced)
+                         (multiple-value-bind (c-val c-err) 
+                             (ignore-errors (multiple-value-list (apply fn inputs)))
                            (cond (type-mismatch
                                   (not (loop for type in types
                                              for value in c-val
                                              always (sb-kernel:%%typep value type))))
                                  (t
-                                  ;; 2. Run Interpreted
                                   (multiple-value-bind (i-val i-err)
-                                      (safe-execute (cons 'i reduced)
-                                                    (lambda ()
-                                                      (let ((sb-ext:*evaluator-mode* :interpret))
-                                                        (handler-bind (((or style-warning warning) #'muffle-warning))
-                                                          (apply (eval reduced) inputs)))))
+                                      (ignore-errors (multiple-value-list (apply 
+                                                                           (interpret-code reduced) 
+                                                                           inputs)))
                                     (and (or (not (or o-c-err c-err))
                                              (eq (type-of c-err) o-c-err))
                                          (or (not (or o-i-err i-err))
@@ -743,7 +749,7 @@
                                          (or (not (or c-val i-val))
                                              (not (values-match-p c-val i-val)))))))))))))))
 
-(defun reduce-memfault (thread code args)
+(defun reduce-memfault (code args)
   (format t "Reducing memfault~%")
   (let ((n-args (length args)))
     (sb-ext:with-timeout 400
@@ -756,14 +762,14 @@
                          (block nil
                            (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
                                           (error (lambda (c) 
-                                                   (report-compiler-error thread code c))))
+                                                   (report-compiler-error code c))))
                              (let ((fun (sb-ext:with-timeout 120 (compile nil reduced))))
                                (handler-bind ((sb-sys:memory-fault-error (lambda (c) (return c)))
                                               (error (lambda (c) c (return))))
                                  (apply fun args)))
                              nil)))))))))
 
-(defun reduce-memfault-i (thread code args)
+(defun reduce-memfault-i (code args)
   (format t "Reducing memfault~%")
   (let ((n-args (length args)))
     (sb-ext:with-timeout 400
@@ -777,7 +783,7 @@
                            
                            (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
                                           (error (lambda (c) 
-                                                   (report-compiler-error thread code c))))
+                                                   (report-compiler-error code c))))
                              (let ((fun (sb-ext:with-timeout 120 
                                           (let ((sb-ext:*evaluator-mode* :interpret))
                                             (eval code)))))
@@ -800,8 +806,8 @@
                          (sb-ext:with-timeout timeout (compile nil reduced))
                          nil)))))))
 
-(defun report-error (thread reason code inputs c-res i-res c-err i-err &key type-mismatch)
-  (let ((reduced (to-defun (reduce-code thread code inputs c-res i-res c-err i-err type-mismatch)
+(defun report-error (reason code inputs c-res i-res c-err i-err &key type-mismatch)
+  (let ((reduced (to-defun (reduce-code code inputs c-res i-res c-err i-err type-mismatch)
                            inputs)))
    (format t "~%!!! DETECTED DISCREPANCY !!!")
    (format t "~%Reason: ~A" reason)
@@ -810,29 +816,26 @@
    (format t "~%Compiled Result: ~S" (or c-res c-err))
    (format t "~%Interpret Result: ~S" (or i-res i-err))
    (format t "~%--------------------------------------------------")
-   (save-test code reduced
-              thread)
-   (error "~a" (format nil "/tmp/test~a" thread))))
+    
+   (error "~a" (save-test code reduced))))
 
-(defun report-memory-fault (thread code inputs)
-  (let ((reduced (to-defun (reduce-memfault thread code inputs)
+(defun report-memory-fault (code inputs)
+  (let ((reduced (to-defun (reduce-memfault code inputs)
                            inputs)))
     (format t "~%!!! MEMORY FAULT !!!")
     (format t "~%Code: ~S"  reduced)
     (format t "~%Inputs: ~A" inputs)
     (format t "~%--------------------------------------------------")
-    (save-test code reduced thread)
-    (error "~a" (format nil "/tmp/test~a" thread))))
+    (error "~a" (save-test code reduced))))
 
-(defun report-memory-fault-i (thread code inputs)
-  (let ((reduced (to-defun (reduce-memfault-i thread code inputs)
+(defun report-memory-fault-i (code inputs)
+  (let ((reduced (to-defun (reduce-memfault-i code inputs)
                            inputs)))
     (format t "~%!!! MEMORY FAULT !!!")
     (format t "~%Code: ~S"  reduced)
     (format t "~%Inputs: ~A" inputs)
     (format t "~%--------------------------------------------------")
-    (save-test code reduced thread)
-    (error "~a" (format nil "/tmp/test~a" thread))))
+    (error "~a" (save-test code reduced))))
 
 (defun is-arithmetic-error (err)
   (or (typep err '(or floating-point-invalid-operation
@@ -842,85 +845,82 @@
            (equal (simple-condition-format-control err)
                   "can't represent result of left shift"))))
 
-(defun run-test (thread)
+
+
+(defvar *optimize-qualities*
+  (loop for s in '(0 1 3)
+        nconc
+        (loop for a in '(1 2 3)
+              nconc
+              (loop for d from 0 to 3 collect
+                    `((speed ,s) (safety ,a) (debug ,d))))))
+
+(defun add-optimize (lambda qualities)
+  `(lambda ,(second lambda)
+     (declare (optimize ,@qualities))
+     ,@(cddr lambda)))
+
+(defun run-test ()
   (let ((target (random-elt *types*)))
-    (multiple-value-bind (code schema) (build-random-function target)
+    (multiple-value-bind (code1 schema) (build-random-function target)
       (when *save*
-        (save-test code nil thread))
-      (let* ((fn (handler-case 
-                     (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
-                       (multiple-value-bind (fun warn fail) (sb-ext:with-timeout 120 (compile nil code))
-                         (declare (ignore warn fail))
-                         ;; (when fail
-                         ;;   (error "~a" code))
-                         fun))
-                   (error (c)
-                     (return-from run-test (report-compiler-error thread code c)))))
-             (type (caddr (sb-kernel:%simple-fun-type fn)))
-             (types (when (and *check-return-type*
-                               (typep type '(cons (eql values))))
-                      (let ((ctype (sb-kernel:values-specifier-type type)))
-                        (sb-kernel:values-type-required ctype)))))
-
-        (loop repeat 2000
+        (save-test code1 nil))
+      (let* ((*error-output* (make-broadcast-stream))
+             (i-fn (interpret-code code1)))
+        (loop for oq in *optimize-qualities*
+              for code = (add-optimize code1 oq)
               do
+              (multiple-value-bind (fn types) (compile-code code)
+                (loop repeat 2000
+                      do
+                      (let ((inputs (loop for (_ . t-name) in schema
+                                          collect (random-const t-name))))
+                        (multiple-value-bind (c-val c-err) 
+                            (ignore-errors (multiple-value-list (apply fn inputs)))
+                          (unless (or c-err
+                                      (loop for type in types
+                                            for value in c-val
+                                            always (sb-kernel:%%typep value type)))
+                            (report-error "TYPE MISMATCH" code inputs c-val types nil nil
+                                          :type-mismatch t))
+                          (multiple-value-bind (i-val i-err) 
+                              (ignore-errors (multiple-value-list (apply i-fn inputs)))
+                            (cond
+                              ;; A. If either failed due to Div-By-Zero, Ignore completely.
+                              ((or (is-arithmetic-error c-err) (is-arithmetic-error i-err))
+                               nil)
 
-              (let ((inputs (loop for (_ . t-name) in schema
-                                  collect (random-const t-name))))
-                (multiple-value-bind (c-val c-err) (safe-execute code
-                                                                 (lambda ()
-                                                                   (apply fn inputs)))
-                  (unless (or c-err
-                              (loop for type in types
-                                    for value in c-val
-                                    always (sb-kernel:%%typep value type)))
-                    (report-error thread "TYPE MISMATCH" code inputs c-val type nil nil
-                                  :type-mismatch t))
-                  ;; 2. Run Interpreted
-                  (multiple-value-bind (i-val i-err)
-                      (safe-execute (cons 'i code)
-                                    (lambda ()
-                                      (let ((sb-ext:*evaluator-mode* :interpret))
-                                        (handler-bind (((or style-warning warning) #'muffle-warning))
-                                          (apply (eval code) inputs)))))
+                              ;; B. Both Succeeded: Check Values
+                              ((and (not c-err) (not i-err))
+                               (unless (values-match-p c-val i-val)
+                                 (report-error "VALUE MISMATCH" code inputs c-val i-val
+                                               c-err i-err)))
+                              ;; C. Both Errored (Non-DivZero): Check Error Types match
+                              ((and c-err i-err)
+                               (let ((c-err (type-of c-err))
+                                     (i-err (type-of i-err)))
+                                 (cond ((eq c-err 'sb-sys:memory-fault-error)
+                                        (report-memory-fault code inputs))
+                                       ((eq i-err 'sb-sys:memory-fault-error)
+                                        (report-memory-fault-i code inputs))
+                                       (t
+                                        (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
+                                                              (eq i-err 'sb-sys:memory-fault-error)))
+                                                     (or (eq c-err i-err)
+                                                         (subtypep c-err i-err)
+                                                         (subtypep i-err c-err)
+                                                         (and (eq i-err 'sb-kernel:case-failure)
+                                                              (subtypep c-err 'type-error))
+                                                         (and (eq c-err 'sb-kernel:case-failure)
+                                                              (subtypep i-err 'type-error))))
+                                          (report-error "ERROR TYPE MISMATCH" code inputs c-val i-val
+                                                        c-err i-err))))))
 
-                    ;; 3. Compare (Filtering Logic)
-                    (cond
-                      ;; A. If either failed due to Div-By-Zero, Ignore completely.
-                      ((or (is-arithmetic-error c-err) (is-arithmetic-error i-err))
-                       nil)
-
-                      ;; B. Both Succeeded: Check Values
-                      ((and (not c-err) (not i-err))
-                       (unless (values-match-p c-val i-val)
-                         (report-error thread "VALUE MISMATCH" code inputs c-val i-val
-                                       c-err i-err)))
-                      ;; C. Both Errored (Non-DivZero): Check Error Types match
-                      ((and c-err i-err)
-                       (let ((c-err (type-of c-err))
-                             (i-err (type-of i-err)))
-                         (cond ((eq c-err 'sb-sys:memory-fault-error)
-                                (report-memory-fault thread code inputs))
-                               ((eq i-err 'sb-sys:memory-fault-error)
-                                (report-memory-fault-i thread code inputs))
-                               (t
-                                (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
-                                                      (eq i-err 'sb-sys:memory-fault-error)))
-                                             (or (eq c-err i-err)
-                                                 (subtypep c-err i-err)
-                                                 (subtypep i-err c-err)
-                                                 (and (eq i-err 'sb-kernel:case-failure)
-                                                      (subtypep c-err 'type-error))
-                                                 (and (eq c-err 'sb-kernel:case-failure)
-                                                      (subtypep i-err 'type-error))))
-                                  (report-error thread "ERROR TYPE MISMATCH" code inputs c-val i-val
-                                                c-err i-err))))))
-
-                      ;; D. One Error, One Success (Non-DivZero)
-                      (t
-                       (report-error thread "STATUS MISMATCH (One Error/One Value)"
-                                     code inputs c-val i-val
-                                     c-err i-err)))))))))))
+                              ;; D. One Error, One Success (Non-DivZero)
+                              (t
+                               (report-error "STATUS MISMATCH (One Error/One Value)"
+                                             code inputs c-val i-val
+                                             c-err i-err)))))))))))))
 
 ;;; ================================================================
 ;;; 4. MAIN LOOP
@@ -958,15 +958,16 @@
     (setf *number-types* (remove 'boolean *types*)))
   (if (= threads 1)
       (loop
-       (run-test 0))
+       (run-test))
       (let ((threads
               (loop for i below threads
                     collect
                     (let ((i i))
                       (sb-thread:make-thread
                        (lambda ()
-                         (loop
-                          (run-test i)))
+                         (let ((*thread* i))
+                          (loop
+                           (run-test))))
                        :name (format nil "random ~a" i))))))
         (unwind-protect (mapcar (lambda (th)
                                   (sb-thread:join-thread th :default nil)) threads)
