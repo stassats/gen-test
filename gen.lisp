@@ -401,16 +401,16 @@
            ;; `(sb-sys:sap-ref-8 (sb-sys:int-sap 0) 0)
            `(call 
              ',(if (zerop (random 2))
-                   (random-elt (load-time-value 
-                                (list t #\a #\b #\0
-                                      "a" #() #(1)
-                                      #*00 '(1 2)
-                                      (make-hash-table)
-                                      #p"a" #'max
-                                      (let ((n 0))
-                                        (call (lambda () (incf n)))
-                                        (lambda () n))
-                                      (find-class 'list))))
+                   `(load-time-value 
+                     ,(random-elt '(t #\a #\b #\0
+                                    "a" #() #(1)
+                                    #*00 '(1 2)
+                                    (make-hash-table)
+                                    #p"a" #'max
+                                    (let ((n 0))
+                                      (call (lambda () (incf n)))
+                                      (lambda () n))
+                                    (find-class 'list))))
                    (random-const (random-elt (remove type *types* :test #'eq)))))
            )
           (loop
@@ -684,18 +684,22 @@
                   (and (eq err1 'sb-kernel:case-failure)
                        (subtypep err2 'type-error)))))))
 
-(defun reduce-compiler-error (code)
-  (sb-ext:with-timeout 400
-    (reduce-form code
-                 (lambda (reduced)
-                   (when (and (typep reduced '(cons (eql lambda) (cons cons)))
-                              (every #'symbolp (second reduced)))
-                     (let* ((*error-output* (make-broadcast-stream)))
-                       (block nil
-                         (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
-                                        (error (lambda (c) (return c))))
-                           (sb-ext:with-timeout 120 (compile nil reduced))
-                           nil))))))))
+(defun reduce-compiler-error (code error)
+  (let ((error (if (symbolp error)
+                   error
+                   (type-of error))))
+   (sb-ext:with-timeout 400
+     (reduce-form code
+                  (lambda (reduced)
+                    (when (and (typep reduced '(cons (eql lambda) (cons cons)))
+                               (every #'symbolp (second reduced)))
+                      (let* ((*error-output* (make-broadcast-stream)))
+                        (block nil
+                          (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning)
+                                         (error (lambda (c)
+                                                  (return (eq (type-of c) error)))))
+                            (sb-ext:with-timeout 120 (compile nil reduced))
+                            nil)))))))))
 
 (defun to-defun (code &optional inputs)
   (if inputs
@@ -705,7 +709,7 @@
       `(defun f ,@(cdr code))))
 
 (defun report-compiler-error (code error)
-  (let ((reduced (to-defun (reduce-compiler-error code))))
+  (let ((reduced (to-defun (reduce-compiler-error code error))))
    (format t "~%!!! COMPILER ERROR !!!")
    (format t "~%Reason: ~A" error)
    (format t "~%Code: ~S"  reduced)
@@ -850,9 +854,9 @@
 (defvar *optimize-qualities*
   (loop for s in '(0 1 3)
         nconc
-        (loop for a in '(1 2 3)
+        (loop for a in '(0 1 2 3)
               nconc
-              (loop for d from 0 to 3 collect
+              (loop for d from 1 to 3 collect
                     `((speed ,s) (safety ,a) (debug ,d))))))
 
 (defun add-optimize (lambda qualities)
@@ -866,25 +870,43 @@
       (when *save*
         (save-test code1 nil))
       (let* ((*error-output* (make-broadcast-stream))
-             (i-fn (interpret-code code1)))
-        (loop for oq in *optimize-qualities*
-              for code = (add-optimize code1 oq)
-              do
-              (multiple-value-bind (fn types) (compile-code code)
-                (loop repeat 2000
-                      do
-                      (let ((inputs (loop for (_ . t-name) in schema
-                                          collect (random-const t-name))))
-                        (multiple-value-bind (c-val c-err) 
-                            (ignore-errors (multiple-value-list (apply fn inputs)))
-                          (unless (or c-err
-                                      (loop for type in types
-                                            for value in c-val
-                                            always (sb-kernel:%%typep value type)))
-                            (report-error "TYPE MISMATCH" code inputs c-val types nil nil
-                                          :type-mismatch t))
-                          (multiple-value-bind (i-val i-err) 
-                              (ignore-errors (multiple-value-list (apply i-fn inputs)))
+             (i-fn (interpret-code code1))
+             (inputs (loop repeat 2000
+                           collect (loop for (_ . t-name) in schema
+                                         collect (random-const t-name))))
+             (answers (loop for input in inputs
+                            collect (multiple-value-list 
+                                     (ignore-errors (multiple-value-list (apply i-fn input)))))))
+        (multiple-value-bind (no-error-answers no-error-inputs)
+            (loop for answer in answers
+                  for input in inputs
+                  when answer
+                  collect answer into no-error-answers
+                  and
+                  collect input into no-error-inputs
+                  finally (return (values no-error-answers no-error-inputs)))
+          (loop for oq in *optimize-qualities*
+                for code = (add-optimize code1 oq)
+                for unsafe = (zerop (second (assoc 'safety oq)))
+                do
+                (let ((answers (if unsafe
+                                   no-error-answers 
+                                   answers))
+                      (inputs (if unsafe
+                                  no-error-inputs 
+                                  inputs)))
+                  (multiple-value-bind (fn types) (compile-code code)
+                    (loop for input in inputs
+                          for (i-val i-err) in answers
+                          do
+                          (multiple-value-bind (c-val c-err) 
+                              (ignore-errors (multiple-value-list (apply fn input)))
+                            (unless (or c-err
+                                        (loop for type in types
+                                              for value in c-val
+                                              always (sb-kernel:%%typep value type)))
+                              (report-error "TYPE MISMATCH" code input c-val types nil nil
+                                            :type-mismatch t))
                             (cond
                               ;; A. If either failed due to Div-By-Zero, Ignore completely.
                               ((or (is-arithmetic-error c-err) (is-arithmetic-error i-err))
@@ -893,16 +915,16 @@
                               ;; B. Both Succeeded: Check Values
                               ((and (not c-err) (not i-err))
                                (unless (values-match-p c-val i-val)
-                                 (report-error "VALUE MISMATCH" code inputs c-val i-val
+                                 (report-error "VALUE MISMATCH" code input c-val i-val
                                                c-err i-err)))
                               ;; C. Both Errored (Non-DivZero): Check Error Types match
                               ((and c-err i-err)
                                (let ((c-err (type-of c-err))
                                      (i-err (type-of i-err)))
                                  (cond ((eq c-err 'sb-sys:memory-fault-error)
-                                        (report-memory-fault code inputs))
+                                        (report-memory-fault code input))
                                        ((eq i-err 'sb-sys:memory-fault-error)
-                                        (report-memory-fault-i code inputs))
+                                        (report-memory-fault-i code input))
                                        (t
                                         (unless (and (not (or (eq c-err 'sb-sys:memory-fault-error)
                                                               (eq i-err 'sb-sys:memory-fault-error)))
@@ -913,13 +935,13 @@
                                                               (subtypep c-err 'type-error))
                                                          (and (eq c-err 'sb-kernel:case-failure)
                                                               (subtypep i-err 'type-error))))
-                                          (report-error "ERROR TYPE MISMATCH" code inputs c-val i-val
+                                          (report-error "ERROR TYPE MISMATCH" code input c-val i-val
                                                         c-err i-err))))))
 
                               ;; D. One Error, One Success (Non-DivZero)
                               (t
                                (report-error "STATUS MISMATCH (One Error/One Value)"
-                                             code inputs c-val i-val
+                                             code input c-val i-val
                                              c-err i-err)))))))))))))
 
 ;;; ================================================================
