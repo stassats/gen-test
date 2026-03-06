@@ -1,5 +1,10 @@
 (in-package :cl-user)
 (sb-int:set-floating-point-modes  :traps '(:overflow  :invalid :divide-by-zero))
+(sb-ext:defglobal *compilation-count* 0)
+(declaim (fixnum *compilation-count*))
+(declaim (optimize (sb-c::store-source-form 0)
+                   (sb-c::store-xref-data 0)))
+
 (defvar *thread* 0)
 (defvar *save* nil)
 (defvar *check-return-type* t)
@@ -33,23 +38,42 @@
 
     (truncate (number) integer)
     (ceiling (number) integer)
+    (floor (number) integer)
     (round (number) integer)
+    (mod (number) number)
+    (rem (number) number)
 
     (ffloor (number) number)
     (ftruncate (number) number)
     (fceiling (number) number)
     (fround (number) number)
 
+    (scale-float (number integer) number)
+    (integer-decode-float (number) number)
+    (decode-float (number) number)
+    (float-precision (number) integer)
+    (float-sign (number) number)
+    (float-sign (number number) number)
+
     (max (number number) number)
     (min (number number) number)
     (abs (number) number)
-
+    
     (sin (number) number)
-    (sin (integer) number)
     (cos (number) number)
-    (cos (integer) number)
+    (tan (number) number)
+    (atan (number) number)
+    (atan (number number) number)
+    (acos (number) number)
+    (asin (number) number)
+    (sinh (number) number)
+    (cosh (number) number)
+    (tanh (number) number)
+    (asinh (number) number)
+    (acosh (number) number)
+    (atanh (number) number)
 
-    ;; (expt (number number) number)
+    (expt (number number) number)
     (exp (number) number)
     (log (number) number)
     (log (number number) number)
@@ -59,6 +83,18 @@
     (log (integer) number)
     (log (integer number) number)
     (signum (number) number)
+    (cis (number) number)
+    (complex (number) number)
+    (conjugate (number) number)
+    (phase (number) number)
+    (realpart (number) number)
+    (imagpart (number) number)
+
+    (numerator (number) number)
+    (denominator (number) number)
+
+    (rational (number) number)
+    (rationalize (number) number)
 
     (+   (number integer) number)
     (-   (number integer) number)
@@ -70,6 +106,7 @@
     (>=   (number number) boolean)
     (<=   (number number) boolean)
     (=   (number number) boolean)
+    (/=   (number number) boolean)
     (eql   (number number) boolean)
     (equal   (number number) boolean)
     (equalp   (number number) boolean)
@@ -268,13 +305,21 @@
                        (random (expt 2 max-integer))))
     (float
      (random-const (random-elt '(double-float single-float))))
-    (single-float (* (if (zerop (random 2))
-                         (float (random (expt 2 64)) 1f0)
-                         (scale-float 1f0 (random 100)))
+    (single-float (* (if (zerop (random 10))
+                         (random-elt (load-time-value (list most-positive-single-float least-positive-single-float
+                                                            sb-ext:single-float-positive-infinity (coerce pi 'single-float)
+                                                            (exp 1))))
+                         (if (zerop (random 2))
+                             (float (random (expt 2 64)) 1f0)
+                             (scale-float 1f0 (random 100))))
                      (if (zerop (random 2)) 1 -1)))
-    (double-float (* (if (zerop (random 2))
-                         (float (random (expt 2 64)) 1d0)
-                         (scale-float 1d0 (random 100)))
+    (double-float (* (if (zerop (random 10))
+                         (random-elt (load-time-value (list most-positive-double-float least-positive-double-float
+                                                            sb-ext:double-float-positive-infinity pi
+                                                            (exp 1d0))))
+                         (if (zerop (random 2))
+                             (float (random (expt 2 64)) 1d0)
+                             (scale-float 1d0 (random 100))))
                      (if (zerop (random 2)) 1 -1)))
     (boolean      (if (zerop (random 2)) nil t))
     (fixnum (* (random (if (< (random 100) 50)
@@ -358,6 +403,46 @@
 
 (define-condition random-error (error) ())
 
+;; (defun check-control-stack ()
+;;   (declare (optimize speed))
+;;   (let ((widetag-table 
+;;           (load-time-value
+;;            (let ((table (make-array (ash 1 sb-vm:n-widetag-bits) :element-type '(unsigned-byte 8)
+;;                                                                  :initial-element 0)))
+;;              (loop for tag in sb-vm::(list BIGNUM-WIDETAG RATIO-WIDETAG SINGLE-FLOAT-WIDETAG DOUBLE-FLOAT-WIDETAG COMPLEX-RATIONAL-WIDETAG COMPLEX-SINGLE-FLOAT-WIDETAG COMPLEX-DOUBLE-FLOAT-WIDETAG
+;;                                            SYMBOL-WIDETAG SAP-WIDETAG CODE-HEADER-WIDETAG INSTANCE-WIDETAG FUNCALLABLE-INSTANCE-WIDETAG SIMPLE-FUN-WIDETAG CLOSURE-WIDETAG LRA-WIDETAG-NOTUSED
+;;                                            VALUE-CELL-WIDETAG CHARACTER-WIDETAG UNUSED00-WIDETAG WEAK-POINTER-WIDETAG FDEFN-WIDETAG UNUSED-WIDETAG UNUSED01-WIDETAG UNUSED03-WIDETAG FILLER-WIDETAG
+;;                                            UNUSED04-WIDETAG UNUSED05-WIDETAG UNUSED06-WIDETAG UNUSED07-WIDETAG SIMPLE-ARRAY-WIDETAG SIMPLE-ARRAY-NIL-WIDETAG SIMPLE-VECTOR-WIDETAG
+;;                                            SIMPLE-BIT-VECTOR-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-2-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-4-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-7-WIDETAG
+;;                                            SIMPLE-ARRAY-UNSIGNED-BYTE-8-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-15-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-16-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-31-WIDETAG
+;;                                            SIMPLE-ARRAY-UNSIGNED-BYTE-32-WIDETAG SIMPLE-ARRAY-UNSIGNED-FIXNUM-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-63-WIDETAG SIMPLE-ARRAY-UNSIGNED-BYTE-64-WIDETAG
+;;                                            SIMPLE-ARRAY-SIGNED-BYTE-8-WIDETAG SIMPLE-ARRAY-SIGNED-BYTE-16-WIDETAG SIMPLE-ARRAY-SIGNED-BYTE-32-WIDETAG SIMPLE-ARRAY-FIXNUM-WIDETAG
+;;                                            SIMPLE-ARRAY-SIGNED-BYTE-64-WIDETAG SIMPLE-ARRAY-SINGLE-FLOAT-WIDETAG SIMPLE-ARRAY-DOUBLE-FLOAT-WIDETAG SIMPLE-ARRAY-COMPLEX-SINGLE-FLOAT-WIDETAG
+;;                                            SIMPLE-ARRAY-COMPLEX-DOUBLE-FLOAT-WIDETAG SIMPLE-BASE-STRING-WIDETAG SIMPLE-CHARACTER-STRING-WIDETAG COMPLEX-BASE-STRING-WIDETAG
+;;                                            COMPLEX-CHARACTER-STRING-WIDETAG COMPLEX-BIT-VECTOR-WIDETAG COMPLEX-VECTOR-WIDETAG COMPLEX-ARRAY-WIDETAG UNUSED-ARRAY-WIDETAG)
+;;                    do (setf (aref table tag) 1))
+;;              table))))
+;;     (flet ((is-immediate (val)
+;;              (or (zerop (logand val sb-vm:fixnum-tag-mask))
+;;                  #+64-bit
+;;                  (= (logand val #xff) sb-vm:single-float-widetag)
+;;                  (and (zerop (logandc2 val #x1fffffff)) 
+;;                       (= (logand val #xff) sb-vm:character-widetag))
+;;                  (= val sb-vm:unbound-marker-widetag)))
+;;            (is-pointer (val)
+;;              (= (logand val 3) 3))
+;;            (widetag-p (val)
+;;              (let ((byte (ldb (byte 8 0) val)))
+;;                (eq (aref widetag-table byte) 1))))
+;;       (loop for x from (ash (truly-the (unsigned-byte 63) sb-vm::*control-stack-start*) 1)
+;;             to (- (ash (truly-the (and unsigned-byte fixnum) sb-vm::*control-stack-end*) 1)
+;;                   (* 2 sb-c:+backend-page-bytes+)) by sb-vm:n-word-bytes
+;;             for sap = (sb-sys:int-sap x)
+;;             for val = (sb-sys:sap-ref-word sap 0)
+;;             always (or (is-pointer val)
+;;                        (is-immediate val)
+;;                        (widetag-p val))))))
+
 (defun generate-ast (type depth schema)
   (let ((terminals (unless (or (eq type 'boolean)
                                (= depth 0))
@@ -376,10 +461,11 @@
         (push 'nth-value options)
         (push 'let options)
         (push 'closure options)
-        (push 'error options)
-        (push 'bad-const options)
+        ;(push 'error options)
+        ;(push 'bad-const options)
         (push 'loop options)
-        (push 'flet options)
+        ;(push 'flet options)
+        ;(push 'stack options)
         (when *blocks*
           (push 'return-from options)))
       (when (and *the*
@@ -391,11 +477,33 @@
       (flet ((gen-type ()
                `(or ,@(loop repeat (1+ (random 5))
                             for not = (zerop (random 2))
-                            for type = (random-elt *types*)
+                            for type-base = (random-elt *types*)
+                            for type = (if (and (member type-base '(integer rational))
+                                                (zerop (random 2)))
+                                           (let ((l (random-const type-base))
+                                                 (h (random-const type-base)))
+                                             (when (> l h)
+                                               (rotatef l h))
+                                             (cond ((zerop (random 4))
+                                                    (setf l '*))
+                                                   ((zerop (random 4))
+                                                    (setf h '*))
+                                                   (t
+                                                    (when (and (eq type-base 'rational)
+                                                               (not (eql l h)))
+                                                      (when (zerop (random 2))
+                                                        (setf l (list l)))
+                                                      (when (zerop (random 2))
+                                                        (setf h (list h))))))
+                                             (list type-base l h))
+                                           type-base) 
                             collect (if not
                                         `(not ,type)
                                         type)))))
         (ecase (random-elt options)
+ ;; (stack
+          ;;  `(progn (assert (check-control-stack))
+          ;;          ,(random-const type)))
           (const (random-const type))
           (bad-const 
            ;; `(sb-sys:sap-ref-8 (sb-sys:int-sap 0) 0)
@@ -515,6 +623,7 @@
   (let* ((schema (loop for i from 1 to 3
                        collect (cons (intern (format nil "V~d" i))
                                      (random-elt *types*))))
+         (*max-depth* (min 2 (1+ (random *max-depth*))))
          *blocks*
          (sb-impl::*gentemp-counter* 0)
          (body (generate-ast target-type 0 schema))
@@ -644,6 +753,7 @@
 (declaim (notinline report-compiler-error report-compiler-error))
 
 (defun compile-code (code)
+  ;(sb-ext:atomic-incf *compilation-count*)
   (handler-case 
       (handler-bind (((or sb-ext:code-deletion-note sb-ext:compiler-note style-warning warning) #'muffle-warning))
         (multiple-value-bind (fun warn fail) 
@@ -846,18 +956,18 @@
                    floating-point-overflow
                    division-by-zero))
       (and (typep err 'simple-error)
-           (equal (simple-condition-format-control err)
-                  "can't represent result of left shift"))))
-
-
+           (or (equal (simple-condition-format-control err)
+                      "can't represent result of left shift")
+               (equal (simple-condition-format-control err)
+                      "Exponent too large to fit into memory: ~a")))))
 
 (defvar *optimize-qualities*
-  (loop for s in '(0 1 3)
+  (loop for s in '(0 1)
         nconc
-        (loop for a in '(0 1 2 3)
+        (loop for a in '(0 1 3)
               nconc
-              (loop for d from 1 to 3 collect
-                    `((speed ,s) (safety ,a) (debug ,d))))))
+              (loop for d in '(1 2 3)
+                    collect `((speed ,s) (safety ,a) (debug ,d))))))
 
 (defun add-optimize (lambda qualities)
   `(lambda ,(second lambda)
@@ -870,6 +980,7 @@
       (when *save*
         (save-test code1 nil))
       (let* ((*error-output* (make-broadcast-stream))
+             (*print-pretty* nil)
              (i-fn (interpret-code code1))
              (inputs (loop repeat 2000
                            collect (loop for (_ . t-name) in schema
@@ -880,7 +991,7 @@
         (multiple-value-bind (no-error-answers no-error-inputs)
             (loop for answer in answers
                   for input in inputs
-                  when answer
+                  when (car answer)
                   collect answer into no-error-answers
                   and
                   collect input into no-error-inputs
@@ -947,7 +1058,7 @@
 ;;; ================================================================
 ;;; 4. MAIN LOOP
 ;;; ================================================================
-
+(defvar *rand* (make-random-state t))
 (defun main (&key (threads 12) float depth rational (number t)
                   noise
                   save)
@@ -960,23 +1071,23 @@
     (setf *max-depth* depth))
   (when float
     (setf *operators* (append *operators* *float-ops*))
-    (push 'float *types*))
+    (pushnew 'float *types*))
   (when rational
     (setf *operators* (append *operators* *ratio-ops*))
-    (push 'rational *types*))
+    (pushnew 'rational *types*))
   (when number
-    (setf *operators* (append *operators* *number-ops*))
-    (push 'real *types*)
-    (push 'float *types*)
-    (push 'single-float *types*)
-    (push 'double-float *types*)
-    (push 'rational *types*)
-    (push 'number *types*)
-    (push 'complex *types*)
-    (push '(complex rational) *types*)
-    (push '(complex float) *types*)
-    (push '(complex single-float) *types*)
-    (push '(complex double-float) *types*)
+    (setf *operators* (remove-duplicates (append *operators* *number-ops*)))
+    (pushnew 'real *types*)
+    (pushnew 'float *types*)
+    (pushnew 'single-float *types*)
+    (pushnew 'double-float *types*)
+    (pushnew 'rational *types*)
+    (pushnew 'number *types*)
+    (pushnew 'complex *types*)
+    (pushnew '(complex rational) *types* :test #'equal)
+    (pushnew '(complex float) *types* :test #'equal)
+    (pushnew '(complex single-float) *types* :test #'equal)
+    (pushnew '(complex double-float) *types* :test #'equal)
     (setf *number-types* (remove 'boolean *types*)))
   (if (= threads 1)
       (loop
@@ -992,7 +1103,12 @@
                            (run-test))))
                        :name (format nil "random ~a" i))))))
         (unwind-protect (mapcar (lambda (th)
-                                  (sb-thread:join-thread th :default nil)) threads)
+                                  (sb-thread:join-thread th :default nil ;; :timeout 0.8
+                                                         )
+                                  ;; (format t "~c~a" #\Return *compilation-count*)
+                                  ;; (finish-output)
+                                  )
+                                threads)
           (mapcar (lambda (th)
                     (ignore-errors (sb-thread:terminate-thread th)))
                   threads)))))
